@@ -154,7 +154,9 @@ ws.onclose = () => {
 	};
 	tick();
 };
+ws.binaryType = 'arraybuffer';
 ws.onmessage = e => {
+	if (e.data instanceof ArrayBuffer) return void iconArrived(e.data); // an icon asked for over the socket
 	const m = JSON.parse(e.data);
 	if (Array.isArray(m)) for (const x of m) handle(x); else handle(m); // a batch: one server tick
 };
@@ -196,6 +198,7 @@ function handle(m) {
 			if (m.clientPixel) state.clientPixel = m.clientPixel; // client.pixel_x/y: shifts the view (render.js camera)
 			break;
 		case 'eye': state.eye = { x: m.x, y: m.y, onMob: m.onMob }; break;
+		case 'iconFail': iconFailed(m.id); break;
 		case 'turfset': for (const [x, y, id] of m.cells) state.turfs.set(x + ',' + y, id); break;
 		case 'images':
 			for (const id of m.del) { state.images.delete(id); state.vis.delete('image:' + id); }
@@ -969,27 +972,42 @@ window.addEventListener('beforeunload', e => { if (held.has('Ctrl')) { e.prevent
 // ---------- icons ----------
 const icons = new Map(); // rsc id -> { meta, img, bmp, ready }
 const iconFails = new Map(); // rsc id -> failed loads in a row
+// Icons come over the page socket (ws "icon" -> one binary frame: u32 head length, JSON { id, meta }, PNG):
+// any number at once, where HTTP would queue them behind the browser's few connections to the site. Before the
+// socket is open they come over HTTP as before.
 function getIcon(rsc) {
 	let ic = icons.get(rsc);
 	if (ic) return ic.ready ? ic : null;
 	ic = { ready: false };
 	icons.set(rsc, ic);
+	if (ws.readyState === 1) { ws.send(JSON.stringify({ t: 'icon', id: rsc })); return null; }
 	Promise.all([
 		fetch('/icon/' + rsc + '.json').then(r => r.ok ? r.json() : null),
 		new Promise(res => { const img = new Image(); img.onload = () => res(img); img.onerror = () => res(null); img.src = '/icon/' + rsc + '.png'; }),
-	]).then(([meta, img]) => {
-		// icons made at runtime reach the server's .dyn.rsc a little after their first use: ask again later
-		// (backing off: some never come, such as icons BYOND builds client-side)
-		if (!meta || !img || meta.error) {
-			const n = (iconFails.get(rsc) || 0) + 1;
-			iconFails.set(rsc, n);
-			setTimeout(() => icons.delete(rsc), n <= 10 ? 2000 : 30000); // icons made at runtime show up within seconds
-			return;
-		}
-		meta.byName = new Map(meta.states.map(s => [s.name, s]));
-		Object.assign(ic, { meta, img, ready: true });
-	});
+	]).then(([meta, img]) => (meta && img && !meta.error ? iconReady(rsc, meta, img) : iconFailed(rsc)));
 	return null;
+}
+function iconReady(rsc, meta, img) {
+	const ic = icons.get(rsc);
+	if (!ic) return;
+	meta.byName = new Map(meta.states.map(s => [s.name, s]));
+	Object.assign(ic, { meta, img, ready: true });
+}
+// icons made at runtime reach the server a little after their first use: ask again later (backing off: some
+// never come)
+function iconFailed(rsc) {
+	const n = (iconFails.get(rsc) || 0) + 1;
+	iconFails.set(rsc, n);
+	setTimeout(() => icons.delete(rsc), n <= 10 ? 2000 : 30000);
+}
+function iconArrived(buf) {
+	const len = new DataView(buf).getUint32(0, true);
+	const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, len)));
+	const img = new Image();
+	img.onload = () => iconReady(head.id, head.meta, img);
+	img.onerror = () => iconFailed(head.id);
+	// (an object URL per icon: its src also keys the tint and light caches)
+	img.src = URL.createObjectURL(new Blob([new Uint8Array(buf, 4 + len)], { type: 'image/png' }));
 }
 
 const DIR8 = { 2: 0, 1: 1, 4: 2, 8: 3, 6: 4, 10: 5, 5: 6, 9: 7 };

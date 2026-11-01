@@ -116,6 +116,7 @@ function cachedResource(id) {
 const TRANSFERS = path.join(CACHE, 'transfers.txt');
 const doneTransfers = new Set(fs.existsSync(TRANSFERS) ? fs.readFileSync(TRANSFERS, 'utf8').split('\n').filter(Boolean) : []);
 const resWaiters = new Map(); // id -> [resolve]
+const resTypes = new Map(); // id -> resource type as a server lists it (for debugging)
 const resFetchers = new Set(); // live sessions' id -> bool (false: that server has not listed the id)
 // Icons built from a world's run-time recipes (DDMI) refer to that world's resource list: kept in memory only
 const builtIcons = new Map(); // id -> { id, type, data }
@@ -145,7 +146,7 @@ function fetchResource(id, ms = 20000) {
 		setTimeout(() => {
 			const l = resWaiters.get(id), i = l ? l.indexOf(resolve) : -1;
 			if (i >= 0) { l.splice(i, 1); if (!l.length) resWaiters.delete(id); }
-			if (i >= 0 && process.env.SEEKER_DEBUG_RES) console.log('resource ' + hex8(id) + ' did not come (' + resFetchers.size + ' sessions)');
+			if (i >= 0 && process.env.SEEKER_DEBUG_RES) console.log('resource ' + hex8(id) + ' did not come (' + resFetchers.size + ' sessions, type ' + resTypes.get(id) + ')');
 			resolve(null);
 		}, ms);
 	});
@@ -392,12 +393,16 @@ wss.on('connection', (ws, req) => {
 	};
 	// Entries of a "resources" fragment; enciphered ones (type | 0x80) are keyed by their real id, which their
 	// header hides: they come in the order asked (or of the list, when the server sends its whole .rsc at
-	// login), and the CRC of the result tells a right guess. Returns whether we had asked for them.
+	// login), and the CRC of the result tells a right guess. Returns whether the fragment may be refused next
+	// time ("we have it"): only one nobody asked for (the login preload) whose every entry is now in the disk
+	// cache. Run-time icons (type 12) live in memory only and an entry we could not place is lost: refusing such a
+	// fragment later would leave those resources missing for good (the server sends each one once).
 	function takeResources(buf) {
 		const entries = parseRsc(buf);
 		const asked = [...resAsked.keys()], all = map.resources.map(r => r.id);
-		let solicited = entries.length > 0, next = 0;
+		let solicited = entries.length > 0, next = 0, complete = true;
 		for (const e of entries) {
+			if (((e.type & 0x7f) === 12)) complete = false;
 			if (!(e.type & 0x80)) { tookResource(e.id, e.type, Buffer.from(e.data)); continue; }
 			const guess = list => {
 				for (let k = 0; k < list.length; k++) {
@@ -414,9 +419,9 @@ wss.on('connection', (ws, req) => {
 			if (guess(asked)) continue;
 			solicited = false;
 			next = 0;
-			if (!guess(all)) console.log('[' + sid + '] resource ' + e.name + ' (' + e.data.length + ' bytes) matched no listed id');
+			if (!guess(all)) { complete = false; console.log('[' + sid + '] resource ' + e.name + ' (' + e.data.length + ' bytes) matched no listed id'); }
 		}
-		return solicited;
+		return !solicited && complete;
 	}
 
 	// Message 61 (u32 appearance ids) asks for appearance definitions the client does not have yet.
@@ -554,6 +559,7 @@ wss.on('connection', (ws, req) => {
 				for (let i = from; i < map.resources.length; i++) {
 					const id = map.resources[i].id;
 					resIndex.set(id, i);
+					resTypes.set(id, map.resources[i].type);
 					if (resWaiters.has(id) && !findResource(id)) askResource(id);
 					// fonts in the world's resources are installed, as DreamSeeker does: maptext names them in CSS
 					if (map.resources[i].type === 14) fetchResource(id).then(e => {
@@ -937,7 +943,7 @@ wss.on('connection', (ws, req) => {
 		let data = tr.data;
 		if (tr.gz) try { data = zlib.gunzipSync(data); } catch (err) { console.log('[' + sid + '] transfer ' + tr.name + ': ' + err.message); return; }
 		if (tr.rsc) {
-			if (!takeResources(data)) { doneTransfers.add(hex8(crc)); fs.appendFileSync(TRANSFERS, hex8(crc) + '\n'); }
+			if (takeResources(data)) { doneTransfers.add(hex8(crc)); fs.appendFileSync(TRANSFERS, hex8(crc) + '\n'); }
 			return;
 		}
 		if (tr.type & 0x80) data = decipher(data, crc);
@@ -1070,6 +1076,19 @@ wss.on('connection', (ws, req) => {
 				const onMob = mobApp && mobApp.verbs && mobApp.verbs.includes(m.id);
 				sendVerb(m.id, onMob ? 2 : 8, onMob ? me.ref : 1, [atomArg(m.atom.type, m.atom.ref)]);
 			}
+		} else if (m.t === 'icon' && /^[0-9a-f]{1,8}$/.test(m.id || '')) {
+			// Icons over the page socket: as many at once as the map needs (a browser opens only ~6 HTTP
+			// connections to a site, and one waiting for a resource the server is still sending holds one up).
+			// Answer: one binary frame, u32 length of a JSON head ({ id, meta }), the head, then the PNG.
+			const id = parseInt(m.id, 16) >>> 0;
+			fetchResource(id).then(e => {
+				if (ws.readyState !== 1) return;
+				const meta = e ? dmiMeta(e) : null;
+				if (!e || !meta || meta.error) return void send({ t: 'iconFail', id: m.id });
+				const head = Buffer.from(JSON.stringify({ id: m.id, meta }));
+				const len = Buffer.alloc(4); len.writeUInt32LE(head.length, 0);
+				ws.send(Buffer.concat([len, head, e.data]));
+			});
 		} else if (m.t === 'dumped' && sess.dumped) {
 			sess.dumped(m.data);
 			sess.dumped = null;

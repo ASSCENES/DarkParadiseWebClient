@@ -129,7 +129,7 @@ function collect(list, appId, base, px, py, dir, parentLayer, plane, order, dept
 	const fl = depth === 0 && base.ref !== undefined && !base.image && state.flicks.get(base.kind + ':' + base.ref);
 	const shown = fl ? { ...a, icon_state: fl.state, iconRsc: fl.iconRsc || a.iconRsc } : a;
 	// mouse_opacity is the atom's: its overlays are as clickable as the atom itself
-	list.push({ a: shown, base, px: at.px, py: at.py, dir: d, layer: ownLayer, plane: pl, order, flick: fl || null, tf: mx, rpx: r.px, rpy: r.py, mo: r.mo, rgba, blend, fx, wx: ws ? ws[0] : 0, wy: ws ? ws[1] : 0 });
+	list.push({ a: shown, base, px: at.px, py: at.py, dir: d, layer: ownLayer, plane: pl, order, flick: fl || null, tf: mx, rpx: r.px, rpy: r.py, mo: r.mo, rgba, blend, fx, wx: ws ? ws[0] : 0, wy: ws ? ws[1] : 0, root: depth === 0 });
 	for (const o of a.overlays) collect(list, o, base, at.px, at.py, d, ownLayer, pl, order + 0.001, depth + 1, r, mx, mine, ws);
 }
 
@@ -702,7 +702,16 @@ function blitIcon(d, vx, vy, t) {
 	const a = d.a;
 	if (!a.iconRsc) return null;
 	const ic = getIcon(a.iconRsc);
-	if (!ic) return null;
+	if (!ic) {
+		// a turf whose icon has not come yet is dark, as in DreamSeeker, not a hole into the space behind
+		if (d.root && d.base && d.base.kind === 'turf' && !d.noPaint) {
+			const s = viewport.scale;
+			dc.globalAlpha = 1;
+			dc.fillStyle = '#000';
+			dc.fillRect(Math.round(viewport.x + vx * s), Math.round(viewport.y + viewport.h - (vy + TILE) * s), Math.ceil(TILE * s), Math.ceil(TILE * s));
+		}
+		return null;
+	}
 	let rect;
 	if (d.flick) {
 		rect = frameRect(ic, a.icon_state, d.dir, t - d.flick.start, true);
