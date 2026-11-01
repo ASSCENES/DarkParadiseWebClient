@@ -286,8 +286,13 @@ function parseScreenLoc(loc, vw, vh) {
 	if (!loc) return [];
 	const first = loc.split(',')[0];
 	if (/^[A-Za-z_][\w-]*:/.test(first) && !KEYWORDS.test(first)) return []; // "map_name:x,y" belongs to another map control
+	// "SOUTH+1:6", and also "SOUTH:6+1" (the pixel offset before the tile offset; DreamSeeker takes both)
 	const axis = (tok, horiz) => {
-		const m = tok.trim().match(/^([A-Za-z]+|\d+(?:\.\d+)?)?\s*([+-]\s*\d+(?:\.\d+)?)?\s*(?::\s*(-?\d+))?$/);
+		let m = tok.trim().match(/^([A-Za-z]+|\d+(?:\.\d+)?)?\s*([+-]\s*\d+(?:\.\d+)?)?\s*(?::\s*(-?\d+))?$/);
+		if (!m) {
+			const n = tok.trim().match(/^([A-Za-z]+|\d+(?:\.\d+)?)?\s*:\s*(-?\d+)\s*([+-]\s*\d+(?:\.\d+)?)$/);
+			if (n) m = [n[0], n[1], n[3], n[2]];
+		}
 		if (!m) return null;
 		const size = horiz ? vw : vh;
 		const key = (m[1] || '').toUpperCase();
