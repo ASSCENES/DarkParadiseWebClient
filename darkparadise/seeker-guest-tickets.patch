@@ -1,0 +1,109 @@
+--- a/code/modules/client/launcher_link.dm
++++ b/code/modules/client/launcher_link.dm
+@@ -209,6 +209,8 @@
+ 	var/list/connection_params = params2list(connectiontopic)
+ 	var/token = connection_params["launcher_token"]
+ 	if(!token)
++		if(check_seeker_ticket(connection_params["dpweb"]))
++			return
+ 		reject_unlinked_client()
+ 		return
+ 
+@@ -222,6 +224,31 @@
+ 	))
+ 	SShttp.create_async_request(RUSTG_HTTP_METHOD_POST, "[api_url]/v1/connect/verify", body, headers, CALLBACK(src, PROC_REF(on_launcher_link_response), connectiontopic))
+ 
++/// DreamSeeker-protocol browser clients (Seeker) take a guest ticket from the web gateway's /auth/key and pass it
++/// as byond://host:port?dpweb=<ticket>. The gateway redeems it once; a guest with a valid ticket is let in like a
++/// web guest. Returns TRUE when the ticket check was started (the client is rejected if it fails).
++/client/proc/check_seeker_ticket(ticket)
++	var/check_url = CONFIG_GET(string/seeker_ticket_url)
++	if(!ticket || !check_url || connection != "seeker" || !is_guest_key(key))
++		return FALSE
++	if(!findtext(ticket, regex(@"^dpweb-v1:[0-9a-f]{32}$")))
++		return FALSE
++
++	var/list/headers = list("x-game-secret" = CONFIG_GET(string/seeker_ticket_secret))
++	SShttp.create_async_request(RUSTG_HTTP_METHOD_GET, "[check_url]?token=[url_encode(ticket)]", "", headers, CALLBACK(src, PROC_REF(on_seeker_ticket_response)), sensitive = TRUE)
++	return TRUE
++
++/client/proc/on_seeker_ticket_response(datum/http_response/response)
++	if(QDELETED(src))
++		return
++
++	if(!response || response.errored || response.status_code != 200)
++		log_adminwarn("Failed Login: [key] [computer_id] [address] - Seeker guest ticket rejected")
++		reject_launcher_client("Билет входа недействителен или устарел.")
++		return
++
++	log_game("Seeker guest login: [key] [computer_id] [address]")
++
+ /client/proc/on_launcher_link_response(connectiontopic, datum/http_response/response)
+ 	if(QDELETED(src))
+ 		return
+--- a/code/controllers/configuration/entries/config.dm
++++ b/code/controllers/configuration/entries/config.dm
+@@ -947,6 +947,16 @@
+ /datum/config_entry/flag/web_guest_login
+ 	protection = CONFIG_ENTRY_LOCKED
+ 
++/// Web gateway URL that redeems guest tickets for DreamSeeker-protocol browser clients (Seeker)
++/datum/config_entry/string/seeker_ticket_url
++	default = null
++	protection = CONFIG_ENTRY_LOCKED | CONFIG_ENTRY_HIDDEN
++
++/// Shared secret sent to that URL as the x-game-secret header (the gateway's TICKET_CHECK_SECRET)
++/datum/config_entry/string/seeker_ticket_secret
++	default = null
++	protection = CONFIG_ENTRY_LOCKED | CONFIG_ENTRY_HIDDEN
++
+ /// allow votes to change map
+ /datum/config_entry/flag/allow_vote_map
+ 	default = TRUE
+--- a/config/example/config.txt
++++ b/config/example/config.txt
+@@ -126,6 +126,11 @@
+ #LAUNCHER_API_SECRET changeme
+ ## Identifier of this server as it is known to the launcher backend.
+ #LAUNCHER_SERVER_ID main
++## Let DreamSeeker-protocol browser clients (Seeker) in as guests with a ticket from the web gateway's /auth/key,
++## passed as byond://host:port?dpweb=<ticket>. The URL is the gateway's ticket check; the secret is the gateway's
++## TICKET_CHECK_SECRET (without it the check endpoint is closed).
++#SEEKER_TICKET_URL http://127.0.0.1:8090/internal/ticket
++#SEEKER_TICKET_SECRET changeme
+ ## Refuse any guest connection that did not come from the launcher.
+ ## Enable this whenever GUEST_BAN is off, otherwise anyone can join as a plain guest and dodge bans.
+ #LAUNCHER_REQUIRED
+--- a/tools/webclient/gateway.mjs
++++ b/tools/webclient/gateway.mjs
+@@ -23,8 +23,15 @@
+   basePath: (process.env.BASE_PATH || '').replace(/\/+$/, ''),
+   authSocket: process.env.AUTH_SOCKET || '',
+   byondWebDir: process.env.BYOND_WEB_DIR || '',
++  // the world redeems tickets of DreamSeeker-protocol guests (SEEKER_TICKET_URL) with this secret; unset: closed
++  ticketCheckSecret: process.env.TICKET_CHECK_SECRET || '',
+ };
+ 
++function secretMatches(given) {
++  const a = Buffer.from(String(given || '')), b = Buffer.from(config.ticketCheckSecret);
++  return b.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
++}
++
+ const tickets = createTicketAuthority();
+ const assets = createAssetIndex(JSON.parse(process.env.ASSET_ROOTS || '[]'));
+ const webroot = createWebrootReader(process.env.ASSET_WEBROOT);
+@@ -231,6 +238,14 @@
+     }
+   }
+ 
++  // A DreamSeeker-protocol guest (Seeker) brings a ticket from /auth/key in its connection topic; the world
++  // redeems it here once, as the DD adapter does for web guests.
++  if (p === '/internal/ticket' && config.keyMode === 'self') {
++    if (!secretMatches(req.headers['x-game-secret'])) return send(res, 403, 'forbidden');
++    const ticket = tickets.consume(url.searchParams.get('token') || '');
++    return ticket ? send(res, 200, JSON.stringify(ticket), MIME['.json']) : send(res, 404, 'unknown ticket');
++  }
++
+   if (config.byondWebDir && /^\/res\/[\w.-]+$/.test(p)) {
+     try {
+       const filename = p.slice('/res/'.length);

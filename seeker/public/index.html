@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seeker</title>
+<style>
+	:root {
+		--bg: #101216; --panel: #181b21; --text: #d7dbe0; --muted: #8a919c; --line: #2a2f38; --accent: #4f8cff;
+	}
+	* { box-sizing: border-box; }
+	html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+	/* rows are pinned to the window: a long chat scrolls inside #out instead of stretching the page */
+	/* the map column is as wide as the view needs at full height (--mapw, set by client.js); the side panel gets the rest */
+	#app { display: grid; grid-template-columns: var(--mapw, minmax(0, 1fr)) minmax(360px, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; overflow: hidden; }
+	#mapwrap { position: relative; overflow: hidden; background: #000; }
+	#map { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+	#status { position: absolute; left: 8px; top: 8px; padding: 4px 8px; background: rgba(0,0,0,.6); border-radius: 4px; font-size: 12px; color: var(--muted); pointer-events: none; }
+	#side { display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-width: 0; min-height: 0; }
+	#out { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; word-wrap: break-word; }
+	#out div { margin-bottom: 2px; }
+	#out a { color: var(--accent); }
+	/* common SS13 chat classes; server-side font sizes are capped so one message cannot fill the pane */
+	#out * { font-size: inherit !important; }
+	#out .warning, #out .danger, #out .userdanger, #out .alert, #out .red { color: #ff5c5c; }
+	#out .danger, #out .userdanger, #out .boldannounce, #out .boldwarning { font-weight: bold; }
+	#out .userdanger { font-size: 1.15em; }
+	#out .notice, #out .info, #out .blue { color: #7aa8ff; }
+	#out .boldnotice, #out .bold { font-weight: bold; }
+	#out .purple, #out .deadsay, #out .ghostalert { color: #c58cff; }
+	#out .green, #out .greentext, #out .nicegreen { color: #6fdc6f; }
+	#out .ooc, #out .looc { color: #6fb7ff; font-weight: bold; }
+	#out .say, #out .game { color: var(--text); }
+	#out .name { font-weight: bold; }
+	#out .radio, #out .comradio { color: #3cc33c; }
+	#out .secradio { color: #ff6666; } #out .medradio { color: #6699ff; } #out .engradio { color: #ffaa33; }
+	#out .emote { font-style: italic; }
+	#out .italics, #out i { font-style: italic; }
+	#out .boxed_message, #out .fieldset { border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; margin: 4px 0; }
+	#out .purple_box { border-color: #6b4c8a; } #out .red_box { border-color: #8a4c4c; }
+	#out legend { padding: 0 4px; font-weight: bold; }
+	#out img.icon { width: 16px; height: 16px; vertical-align: middle; image-rendering: pixelated; }
+	#cmd { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); }
+	#cmd input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
+	#lightbtn { position: absolute; right: 8px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#lightbtn.off, #soundbtn.off, #shadowbtn.off, #popbtn.off { color: var(--muted); text-decoration: line-through; }
+	#popbtn { position: absolute; right: 214px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#notice { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 40; display: none; max-width: min(520px, calc(100vw - 32px)); padding: 8px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); font-size: 13px; cursor: pointer; }
+	#shadowbtn { position: absolute; right: 148px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#soundbtn { position: absolute; right: 78px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#serverbtn { position: absolute; right: 290px; top: 8px; z-index: 2; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#serverform { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; width: min(380px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+	#serverform h2 { margin: 0 0 4px; font-size: 16px; }
+	#serverform label { font-size: 12px; color: var(--muted); }
+	#serverform input { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; font: inherit; }
+	#serverform input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+	#serverform .err { margin: 0; font-size: 12px; color: #ff5c5c; }
+	#serverform .hint { margin: -4px 0 0; font-size: 11px; color: var(--muted); }
+	#serverform > button { padding: 8px; background: var(--accent); color: #fff; border: 0; border-radius: 4px; font: inherit; cursor: pointer; }
+	#serverform > button.cancel { background: #20242b; color: var(--text); border: 1px solid var(--line); }
+	#serverform .recent { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+	#serverform .recent button { background: #20242b; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font: inherit; cursor: pointer; }
+	.mapoverlay { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: none; z-index: 4; background: transparent; color-scheme: normal; }
+	#title { position: absolute; inset: 0; border: 0; width: 100%; height: 100%; background: #000; display: none; }
+	#statpane { height: 45%; border: 0; border-bottom: 1px solid var(--line); display: none; background: var(--panel); }
+	#chatpane { flex: 1; border: 0; display: none; min-height: 0; }
+	.win { position: fixed; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 30px rgba(0,0,0,.5); overflow: hidden; z-index: 10; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+	.win .bar { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #20242b; cursor: move; font-size: 12px; color: var(--muted); user-select: none; }
+	.win .bar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.win .bar button { background: none; border: 0; color: var(--text); cursor: pointer; font-size: 14px; }
+	.win iframe { flex: 1; border: 0; width: 100%; background: #fff; }
+	.win.bare { border-radius: 0; }
+	.win.bare .bar { display: none; }
+	.ctxmenu { position: fixed; z-index: 30; display: flex; flex-direction: column; min-width: 160px; max-height: 70vh; overflow-y: auto; padding: 4px 0; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.5); }
+	.ctxmenu button { text-align: left; background: none; border: 0; color: var(--text); padding: 5px 14px; font: inherit; cursor: pointer; white-space: nowrap; }
+	.ctxmenu button:hover, .ctxmenu button.on { background: #2a3140; }
+	.ctxmenu button.atom { display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 6px; }
+	.ctxmenu button.atom span { flex: 1; }
+	.ctxmenu button.atom i { font-style: normal; color: var(--muted); padding-left: 16px; }
+	.ctxmenu .mi { width: 16px; height: 16px; image-rendering: pixelated; flex: none; }
+	.dlg { z-index: 20; width: 360px; }
+	.dlg form { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+	.dlg p { margin: 0; white-space: pre-wrap; }
+	.dlg p:empty { display: none; }
+	.dlg input, .dlg textarea, .dlg select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; }
+	.dlg input[type=color] { height: 36px; padding: 2px; }
+	.dlg .btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+	.dlg .btns button { background: #20242b; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 5px 14px; cursor: pointer; font: inherit; }
+	.dlg .btns button:first-child, .dlg .btns button[type=submit] { border-color: var(--accent); }
+	@media (max-width: 760px) {
+		#app { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 40%; }
+		#side { border-left: 0; border-top: 1px solid var(--line); }
+	}
+</style>
+</head>
+<body>
+<div id="app">
+	<div id="mapwrap"><canvas id="map"></canvas><iframe id="title" title="Лобби"></iframe><div id="status">подключение…</div><button id="lightbtn" title="Освещение вкл/выкл">☀ свет</button><button id="soundbtn" title="Звук вкл/выкл">♪ звук</button><button id="shadowbtn" title="Тени под объектами (ambient occlusion): красивее, но тяжелее">◐ тени</button><button id="popbtn" title="Окна tgui и браузера — отдельными окнами (нужно разрешить всплывающие окна)">⧉ окна</button></div>
+	<div id="side">
+		<iframe id="statpane" title="Статпанель"></iframe>
+		<iframe id="chatpane" title="Чат"></iframe>
+		<div id="out"></div>
+		<form id="cmd"><input id="topic" placeholder='Enter — команда, напр. say "привет"' autocomplete="off"></form>
+	</div>
+</div>
+<script src="client.js"></script>
+<script src="render.js"></script>
+</body>
+</html>

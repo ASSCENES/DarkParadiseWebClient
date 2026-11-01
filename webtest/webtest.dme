@@ -1,0 +1,637 @@
+// Test world for the BYOND webclient
+#define DEBUG
+
+world
+	fps = 20
+	icon_size = 32
+	view = "15x15"
+	mob = /mob/player
+	turf = /turf/floor
+
+/turf/floor
+	icon = 'test.dmi'
+	icon_state = "floor"
+
+/turf/wall
+	icon = 'test.dmi'
+	icon_state = "wall"
+	density = 1
+	opacity = 1
+
+/mob/player
+	see_invisible = 77
+	see_in_dark = 9
+	sight = SEE_TURFS
+	var/image/probe_img
+	var/obj/probe_obj
+	icon = 'test.dmi'
+	icon_state = "mob"
+
+	Login()
+		..()
+		loc = locate(5, 5, 1)
+		world << "<b>[key]</b> joined."
+		spawn(20) known_plaintext()
+		spawn(25)
+			var/m = client.MeasureText("<span class='center'>Hello world, this is a long runechat line</span>", null, 112)
+			world << "measure=[m]"
+		if(fexists("autodialogs.txt"))
+			spawn(40) run_dialogs()
+		spawn(30)
+			src << link("byond://?src=\ref[src];ping=1")
+			winset(src, null, "command=\"say hello-from-command\"")
+
+	// Sends fixed text so the encrypted stream can be compared against it
+	proc/known_plaintext()
+		var/n = 0
+		for(var/i in 32 to 33)
+			src << ascii2text(i)
+		for(var/i in 0 to 1)
+			src << "N=[i]"
+		while(client)
+			src << "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			sleep(10)
+			src << "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+			sleep(10)
+			src << "N=[n++]"
+			sleep(10)
+
+	Stat()
+		statpanel("Status")
+		stat("Time", world.time)
+		stat("Location", "[x],[y]")
+
+	verb/say(msg as text)
+		world << "<b>[usr]:</b> [html_encode(msg)]"
+
+	proc/run_dialogs()
+		var/r = alert(src, "Are you sure?", "DlgAlert", "Yes", "No", "Maybe")
+		src << "alert=[r]"
+		r = input(src, "Your name?", "DlgText", "default") as text|null
+		src << "text=[r]"
+		r = input(src, "Number?", "DlgNum", 5) as num
+		src << "num=[r]"
+		r = input(src, "Pick", "DlgList", "b") as null|anything in list("a", "b", "c")
+		src << "list=[r]"
+		r = input(src, "Long text", "DlgMsg") as message
+		src << "msg=[r]"
+		r = input(src, "Pick mob", "DlgMob") as mob in world
+		src << "mob=[r]"
+
+	// Each probe prints a marker, does one thing and prints another, so its messages can be found in a dump
+	proc/probe(name)
+		src << "PROBE-BEGIN [name]"
+		sleep(5)
+		switch(name)
+			if("turf_wall") new /turf/wall(locate(x + 1, y, z))
+			if("turf_floor") new /turf/floor(locate(x + 1, y, z))
+			if("turf_icon")
+				var/turf/T = locate(x, y + 1, z)
+				T.icon_state = "wall"
+			if("image_add")
+				probe_img = image('test.dmi', src, "wall", layer = 10)
+				probe_img.pixel_x = 8
+				client.images += probe_img
+			if("image_change") probe_img.icon_state = "mob"
+			if("image_del") client.images -= probe_img
+			if("flick") flick("wall", src)
+			if("animate") animate(src, alpha = 60, time = 10)
+			if("animate_loop") animate(src, pixel_y = 8, time = 5, loop = -1)
+			if("overlay") overlays += image('test.dmi', "wall", pixel_x = 10)
+			if("maptext") maptext = "<b>hi</b>"
+			if("obj_new") probe_obj = new /obj/marker(locate(x - 1, y, z))
+			if("obj_del") del(probe_obj)
+			if("teleport") loc = locate(15, 15, 1)
+			if("transform") transform = matrix() * 2
+			if("turn") transform = turn(matrix(), 90)
+			if("untransform") transform = null
+			if("see77") see_invisible = 77
+			if("see5") see_invisible = 5
+			if("sight") sight = SEE_TURFS
+			if("invis") invisibility = 33
+			if("mo0") mouse_opacity = 0
+			if("mo2") mouse_opacity = 2
+			if("mo1") mouse_opacity = 1
+			if("sound") src << sound('beep.wav')
+			if("sound_vol") src << sound('beep.wav', volume = 30, channel = 5)
+			if("sound_pos")
+				var/sound/S = sound('beep.wav', channel = 6)
+				S.x = 3; S.y = 0; S.z = -2; S.falloff = 2; S.frequency = 2
+				src << S
+			if("sound_loop") src << sound('beep.wav', repeat = 1, channel = 7, volume = 70)
+			if("sound_stop") src << sound(null, channel = 7)
+			if("sound_view") playsound_like()
+			if("s_freq") src << sound('beep.wav', channel = 9, frequency = 3)
+			if("s_x")
+				var/sound/S = sound('beep.wav', channel = 10)
+				S.x = 5
+				src << S
+			if("s_falloff")
+				var/sound/S = sound('beep.wav', channel = 11)
+				S.falloff = 7
+				src << S
+			if("s_pan")
+				var/sound/S = sound('beep.wav', channel = 12)
+				S.pan = -50
+				src << S
+			if("s_offset")
+				var/sound/S = sound('beep.wav', channel = 13)
+				S.offset = 1.5
+				src << S
+			if("s_status") src << sound('beep.wav', channel = 14, status = SOUND_STREAM)
+			if("s_wait") src << sound('beep.wav', wait = 1, channel = 15)
+		sleep(10)
+		src << "PROBE-END [name]"
+
+	verb/look_at(atom/A as obj|mob|turf in view())
+		usr << "look [A] at [A.x],[A.y]"
+
+	proc/playsound_like()
+		for(var/mob/M in view(src))
+			M << sound('beep.wav', channel = 8, volume = 50)
+
+	verb/probe_one(n as text)
+		probe(n)
+
+	verb/probe_all()
+		for(var/n in list("turf_wall", "turf_floor", "turf_icon", "image_add", "image_change", "image_del", "flick", "animate", "overlay", "maptext", "obj_new", "obj_del", "transform", "animate_loop", "teleport"))
+			probe(n)
+			sleep(10)
+
+	verb/test_alert()
+		var/r = alert(usr, "Are you sure?", "Title", "Yes", "No", "Maybe")
+		usr << "alert=[r]"
+
+	verb/test_input_text()
+		var/r = input(usr, "Your name?", "Name", "default") as text|null
+		usr << "text=[r]"
+
+	verb/test_input_num()
+		var/r = input(usr, "Number?", "Num", 5) as num
+		usr << "num=[r]"
+
+	verb/test_input_list()
+		var/r = input(usr, "Pick", "List", "b") as null|anything in list("a", "b", "c")
+		usr << "list=[r]"
+
+	verb/test_input_mob()
+		var/mob/r = input(usr, "Pick mob", "Mob") as null|mob in world
+		usr << "mob=[r] [r ? r.x : 0]"
+
+	verb/test_input_msg()
+		var/r = input(usr, "Long text", "Msg") as message
+		usr << "msg=[r]"
+
+	verb/test_browse()
+		usr << browse("<html><body><h1>Browser popup</h1><a href='byond://?src=\ref[src];ping=1'>ping</a></body></html>", "window=testwin;size=300x200")
+
+	// a runtime-built icon as an overlay (Paradise's damage overlays are made so)
+	verb/test_dynicon()
+		var/icon/I = new('test.dmi', "wall")
+		I.Blend(rgb(255, 0, 0), ICON_MULTIPLY)
+		var/mutable_appearance/MA = new
+		MA.icon = 'test.dmi'
+		MA.icon_state = "floor"
+		MA.overlays += I
+		overlays += MA
+		usr << "dynicon added"
+
+	// Paradise's shake_camera: animate() on the client's pixel offsets; and a plain client.pixel_x change
+	verb/test_shake()
+		var/client/C = usr.client
+		animate(C, pixel_x = 20, pixel_y = -10, time = 2)
+		animate(pixel_x = -15, pixel_y = 12, time = 2)
+		animate(pixel_x = 0, pixel_y = 0, time = 2)
+
+	verb/test_clientpixel()
+		usr.client.pixel_x = usr.client.pixel_x ? 0 : 16
+
+	// samples of runtime icons for working out the DDMI recipe format; their names say what was done
+	verb/test_ddmi()
+		var/list/L = list()
+		var/icon/I
+		I = new('test.dmi', "wall"); L["plain wall"] = I
+		I = new('test.dmi', "mob"); L["plain mob"] = I
+		I = new('test.dmi'); L["whole file"] = I
+		I = new('test.dmi', "wall"); I.Blend(rgb(0, 255, 0), ICON_MULTIPLY); L["wall mul green"] = I
+		I = new('test.dmi', "wall"); I.Blend(rgb(0, 0, 255), ICON_ADD); L["wall add blue"] = I
+		I = new('test.dmi', "wall"); I.Blend(rgb(0, 0, 255, 128), ICON_OVERLAY); L["wall overlay blue128"] = I
+		I = new('test.dmi', "wall"); I.Blend(new /icon('test.dmi', "mob"), ICON_MULTIPLY); L["wall mul icon mob"] = I
+		I = new('test.dmi', "wall"); I.Blend(new /icon('test.dmi', "mob"), ICON_OVERLAY, 3, 5); L["wall overlay mob at 3,5"] = I
+		I = new('test.dmi', "wall"); I.Blend(rgb(255, 0, 0), ICON_MULTIPLY); I.Blend(rgb(0, 0, 255), ICON_ADD); L["wall mul red add blue"] = I
+		I = new('test.dmi', "wall"); I.Turn(90); L["wall turn 90"] = I
+		I = new('test.dmi', "wall"); I.Flip(EAST); L["wall flip east"] = I
+		I = new('test.dmi', "wall"); I.Shift(NORTH, 4); L["wall shift north 4"] = I
+		I = new('test.dmi', "wall"); I.SetIntensity(2); L["wall intensity 2"] = I
+		I = new('test.dmi', "wall"); I.SwapColor(rgb(0, 0, 0), rgb(255, 0, 255)); L["wall swap black magenta"] = I
+		I = new('test.dmi', "wall"); I.Scale(64, 64); L["wall scale 64"] = I
+		I = new('test.dmi', "wall"); I.Crop(1, 1, 16, 16); L["wall crop 16"] = I
+		I = new('test.dmi', "wall"); I.DrawBox(rgb(255, 255, 0), 2, 2, 10, 10); L["wall box yellow"] = I
+		I = new('test.dmi', "wall", SOUTH); L["wall dir south"] = I
+		I = new('test.dmi', "wall", null, 1); L["wall frame 1"] = I
+		I = new('test.dmi', "wall"); I.MapColors(0.5,0,0, 0,0.5,0, 0,0,0.5, 0,0,0); L["wall mapcolors half"] = I
+		I = new('test.dmi', "wall"); I.Insert(new /icon('test.dmi', "mob"), "added"); L["wall insert mob added"] = I
+		var/i = 0
+		for(var/k in L)
+			var/obj/O = new(locate(1 + i % 8, 1 + round(i / 8), 1))
+			O.icon = L[k]
+			O.name = k
+			usr << "[k] = [O.icon]"
+			i++
+
+	// Paradise's balloon alert: an image that rises in one sequence and fades in and out in a parallel one
+	verb/test_balloon()
+		var/image/I = image(loc = src, layer = 20)
+		I.alpha = 0
+		I.appearance_flags = RESET_ALPHA|RESET_COLOR|RESET_TRANSFORM
+		I.maptext = "<span style='text-align: center'>balloon test</span>"
+		I.maptext_x = -32
+		I.maptext_width = 96
+		I.maptext_height = 16
+		usr.client.images += I
+		animate(I, pixel_z = 38, time = 30, easing = SINE_EASING | EASE_OUT)
+		animate(alpha = 255, time = 4, easing = CUBIC_EASING | EASE_OUT, flags = ANIMATION_PARALLEL)
+		animate(alpha = 0, time = 26, easing = CUBIC_EASING | EASE_IN)
+		spawn(30) usr.client.images -= I
+
+	// a tgui-like window: icon by resource ref (DmIcon) and tgui's own drag (screenLeft + winget/winset pos)
+	verb/test_tgui()
+		var/ref = "\ref['test.dmi']"
+		usr << browse({"<html><body style='margin:0;background:#123'>
+<div id='bar' style='background:#2a5;color:#fff;padding:6px;cursor:move'>drag me</div>
+<img id='ic' src='[ref]?state=mob&dir=2&movement=false&frame=1' width=64 height=64 style='image-rendering:pixelated'>
+<img src='[ref]?state=wall&dir=1&frame=1'><div id='log' style='color:#fff;font:11px monospace'></div>
+<script>
+var id='tgui-window-test', off=null, drag=null, pr=window.devicePixelRatio||1;
+function sl(){return window.screenLeft*pr} function st(){return window.screenTop*pr}
+window.gotPos=function(p){off={x:p.x-sl(),y:p.y-st()};document.getElementById('log').textContent='pos '+p.x+','+p.y+' screenLeft '+sl()+' dpr '+pr};
+window.cef_to_byond('byond://winget?id='+id+'&property=pos&callback=gotPos');
+document.getElementById('bar').onmousedown=function(e){drag={x:e.screenX*pr-sl(),y:e.screenY*pr-st()};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up)};
+function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up)}
+function mv(e){if(!off)return;window.cef_to_byond('byond://winset?id='+id+'&pos='+(e.screenX*pr-drag.x+off.x)+','+(e.screenY*pr-drag.y+off.y))}
+</script></body></html>"}, "window=tgui-window-test;size=260x200")
+
+	Topic(href, list/hl)
+		if(hl["ping"])
+			usr << "pong"
+
+/obj/marker
+	icon = 'test.dmi'
+	icon_state = "wall"
+
+	verb/poke()
+		set src in view()
+		world << "poke [src]"
+
+	MouseDrop(over_object, src_location, over_location, src_control, over_control, params)
+		world << "drop [src] -> [over_object] at [over_location] ([src_control] -> [over_control]) [params]"
+
+	MouseDrag(over_object, src_location, over_location, src_control, over_control, params)
+		world << "drag [src] over [over_object]"
+
+	MouseDown(location, control, params)
+		world << "down [src] [params]"
+
+/obj/fancy
+	icon = 'test.dmi'
+	icon_state = "mob"
+	pixel_x = 5
+	pixel_y = -3
+	layer = 5
+	dir = 4
+	alpha = 200
+	color = "#00ff00"
+
+/obj/walker
+	icon = 'test.dmi'
+	icon_state = "mob"
+	New()
+		..()
+		spawn(10)
+			while(src)
+				step(src, EAST)
+				sleep(10)
+				step(src, WEST)
+				sleep(10)
+
+/world/New()
+	..()
+	for(var/x in 1 to world.maxx)
+		new /turf/wall(locate(x, 1, 1))
+		new /turf/wall(locate(x, world.maxy, 1))
+	for(var/y in 1 to world.maxy)
+		new /turf/wall(locate(1, y, 1))
+		new /turf/wall(locate(world.maxx, y, 1))
+	for(var/i in 1 to 3)
+		new /mob/dummy(locate(10 + i, 10, 1))
+	new /obj/marker(locate(3, 3, 1))
+	new /obj/freshpic(locate(6, 4, 1))
+	var/obj/fancy/F = new(locate(7, 7, 1))
+	F.overlays += image('test.dmi', "wall")
+	new /obj/walker(locate(4, 8, 1))
+
+world/maxx = 20
+world/maxy = 20
+world/maxz = 1
+// BEGIN_INTERNALS
+// END_INTERNALS
+// BEGIN_FILE_DIR
+#define FILE_DIR .
+// END_FILE_DIR
+// BEGIN_PREFERENCES
+// END_PREFERENCES
+// BEGIN_INCLUDE
+// END_INCLUDE
+
+/mob/dummy
+	icon = 'test.dmi'
+	icon_state = "mob"
+
+// radial menu as Paradise builds it: an image on the mob whose vis_contents are clickable buttons
+/obj/radialbtn
+	icon = 'test.dmi'
+	icon_state = "wall"
+	layer = 30
+	Click()
+		usr << "radial click [name]"
+
+/mob/player/verb/test_radial()
+	var/image/holder = image(icon = 'test.dmi', loc = src, icon_state = "nothing", layer = 29)
+	holder.plane = 5
+	holder.appearance_flags |= KEEP_APART|RESET_ALPHA|RESET_COLOR|RESET_TRANSFORM
+	for(var/i in 1 to 4)
+		var/obj/radialbtn/B = new
+		B.name = "btn[i]"
+		B.screen_loc = "CENTER,CENTER"
+		B.alpha = 0
+		holder.vis_contents += B
+		animate(B, pixel_x = round(sin(i * 90) * 32), pixel_y = round(cos(i * 90) * 32), time = 2)
+		animate(B, alpha = 255, time = 2)
+	client.images += holder
+	spawn(300)
+		client.images -= holder
+
+// plastic flaps as Paradise draws them: the object has alpha 0 and a shared vis_contents overlay shows it
+var/obj/flapvis/shared_flapvis
+/obj/flapvis
+	icon = 'test.dmi'
+	icon_state = "wall"
+	alpha = 150
+	mouse_opacity = 0
+	vis_flags = VIS_INHERIT_DIR
+	appearance_flags = RESET_ALPHA
+/obj/flaps
+	name = "flaps"
+	icon = 'test.dmi'
+	icon_state = "wall"
+	New()
+		..()
+		alpha = 0
+		if(!shared_flapvis)
+			shared_flapvis = new
+		vis_contents += shared_flapvis
+
+/mob/player/verb/test_flaps()
+	new /obj/flaps(locate(x + 2, y, z))
+	new /obj/flaps(locate(x + 2, y + 1, z))
+
+/obj/dropme
+	name = "dropme"
+	icon = 'test.dmi'
+	icon_state = "wall"
+
+/mob/player/verb/test_drop()
+	var/obj/dropme/D = new(src)
+	sleep(10)
+	D.loc = locate(x - 1, y, z)
+
+// Paradise's item drop animation: the item lands transparent and offset, then animates back
+/mob/player/verb/test_drop_anim()
+	var/obj/dropme/D = new(src)
+	sleep(5)
+	D.loc = locate(x - 1, y + 1, z)
+	var/matrix/M = matrix()
+	M.Turn(30)
+	M.Scale(0.7)
+	D.pixel_x = 32
+	D.pixel_y = -32
+	D.alpha = 0
+	D.transform = M
+	animate(D, pixel_x = 0, pixel_y = 0, alpha = 255, transform = matrix(), time = 3, easing = CUBIC_EASING | EASE_OUT)
+
+// an item held in a hand slot (client.screen) and then dropped on the floor, as SS13 does
+/mob/player/verb/test_hand_drop()
+	var/obj/dropme/D = new(src)
+	D.name = "handitem"
+	D.screen_loc = "CENTER+1,SOUTH"
+	client.screen += D
+	sleep(20)
+	client.screen -= D
+	D.screen_loc = null
+	D.loc = locate(x + 1, y - 1, z)
+
+// resources on demand, as ss1984 (PRELOAD_RSC 0): the client asks for each resource it does not have
+/client
+	preload_rsc = 1
+
+/obj/freshpic
+	name = "freshpic"
+	icon = 'fresh.png'
+
+/mob/player/verb/test_fresh()
+	new /obj/freshpic(locate(x, y + 1, z))
+
+// the world deletes the client, as SS13 does when it rejects a login
+/mob/player/verb/test_kick()
+	del(client)
+
+// animate() variants for decoding message 240: easing, flags, delay
+/mob/player/verb/test_easing()
+	var/obj/marker/M = locate() in world
+	var/list/eas = list(LINEAR_EASING, SINE_EASING, CIRCULAR_EASING, CUBIC_EASING, BOUNCE_EASING, ELASTIC_EASING, BACK_EASING, QUAD_EASING, JUMP_EASING, CUBIC_EASING|EASE_IN, CUBIC_EASING|EASE_OUT)
+	for(var/e in eas)
+		usr << "easing [e]"
+		animate(M, pixel_x = 16, time = 5, easing = e)
+		sleep(6)
+		M.pixel_x = 0
+		sleep(2)
+	usr << "flags parallel"
+	animate(M, pixel_x = 16, time = 5, flags = ANIMATION_PARALLEL)
+	sleep(6)
+	usr << "flags end_now"
+	animate(M, pixel_y = 16, time = 5, flags = ANIMATION_END_NOW)
+	sleep(6)
+	usr << "delay 7"
+	animate(M, alpha = 100, time = 5, delay = 7)
+	sleep(14)
+	usr << "loop 3"
+	animate(M, alpha = 255, time = 3, loop = 3)
+	sleep(12)
+	usr << "done"
+
+/mob/player/verb/test_chain()
+	var/obj/marker/M = locate() in world
+	usr << "chain3"
+	animate(M, alpha = 0, time = 4)
+	animate(alpha = 255, time = 4, easing = SINE_EASING)
+	animate(pixel_y = 8, time = 4)
+	sleep(15)
+	usr << "chain after"
+	animate(M, pixel_y = 0, time = 2)
+	sleep(5)
+	usr << "done"
+
+/mob/player/verb/test_glide()
+	var/obj/walker/W = locate() in world
+	W.glide_size = 3.5
+	usr << "glide set"
+
+// one appearance var per object, to find their place in message 38
+/mob/player/verb/test_appvars()
+	var/list/sets = list(
+		"av_plain" = null,
+		"av_blend2" = list("blend_mode" = BLEND_ADD),
+		"av_blend3" = list("blend_mode" = BLEND_SUBTRACT),
+		"av_blend4" = list("blend_mode" = BLEND_MULTIPLY),
+		"av_af_keepapart" = list("appearance_flags" = KEEP_APART),
+		"av_af_resetcolor" = list("appearance_flags" = RESET_COLOR),
+		"av_af_keeptogether" = list("appearance_flags" = KEEP_TOGETHER),
+		"av_af_pixelscale" = list("appearance_flags" = PIXEL_SCALE),
+		"av_af_tilebound" = list("appearance_flags" = TILE_BOUND),
+		"av_af_planemaster" = list("appearance_flags" = PLANE_MASTER),
+		"av_vis_id" = list("vis_flags" = VIS_INHERIT_ID),
+		"av_vis_icon" = list("vis_flags" = VIS_INHERIT_ICON),
+		"av_vis_under" = list("vis_flags" = VIS_UNDERLAY),
+		"av_vis_plane" = list("vis_flags" = VIS_INHERIT_PLANE),
+		"av_alpha" = list("alpha" = 128),
+		"av_override" = list("override" = 1),
+		"av_mo2" = list("mouse_opacity" = 2),
+		"av_suffix" = list("suffix" = "SFX"),
+		"av_glide" = list("glide_size" = 7),
+		"av_vis_contents" = null)
+	var/i = 0
+	for(var/n in sets)
+		var/obj/O = new /obj/marker(locate(2 + (i % 10), 14 + round(i / 10), z))
+		O.name = n
+		var/list/vars_to_set = sets[n]
+		for(var/v in vars_to_set)
+			O.vars[v] = vars_to_set[v]
+		i++
+	usr << "appvars done"
+
+/obj/inh_child
+	icon = 'test.dmi'
+	icon_state = "mob"
+/mob/player/verb/test_inherit()
+	var/obj/P = new /obj/marker(locate(x + 1, y, z))
+	P.name = "inh_parent"
+	P.color = "#ff0000"
+	P.alpha = 128
+	var/image/plain = image('test.dmi', "mob")
+	plain.pixel_x = 8
+	P.overlays += plain
+	var/image/reset = image('test.dmi', "mob")
+	reset.pixel_x = -8
+	reset.appearance_flags = RESET_COLOR | RESET_ALPHA
+	P.overlays += reset
+	var/obj/H = new /obj/marker(locate(x + 2, y, z))
+	H.name = "inh_holder"
+	H.dir = EAST
+	var/obj/inh_child/U = new
+	U.name = "inh_under"
+	U.vis_flags = VIS_UNDERLAY | VIS_INHERIT_DIR | VIS_INHERIT_ID
+	H.vis_contents += U
+	var/obj/B = new /obj/marker(locate(x + 3, y, z))
+	B.name = "inh_add"
+	B.blend_mode = BLEND_ADD
+	usr << "inherit ready"
+
+// overlay dir: image(dir=…) in the constructor keeps its own dir; set afterwards it follows the atom
+/mob/player/verb/test_dirs()
+	var/obj/O = new /obj/marker(locate(x, y + 2, z))
+	O.name = "av_dirholder"
+	O.dir = NORTH
+	var/image/A = image('test.dmi', null, "mob", 3, EAST)
+	A.name = "av_dir_ctor"
+	O.overlays += A
+	var/image/B = image('test.dmi', "mob")
+	B.dir = EAST
+	B.name = "av_dir_after"
+	O.overlays += B
+	var/image/C = image('test.dmi', "mob")
+	C.name = "av_dir_none"
+	O.overlays += C
+	var/mutable_appearance/M = new(A)
+	M.name = "av_dir_ma_from_ctor"
+	O.overlays += M
+	usr << "appvars done"
+
+// a projectile moving as Paradise's does: 12 px a tick; on a tile change step there and pull pixel_x back,
+// then animate pixel_x on over one tick
+/obj/bullet
+	name = "bullet"
+	icon = 'test.dmi'
+	icon_state = "mob"
+/mob/player/verb/test_projectile()
+	var/obj/bullet/B = new(locate(2, y + 3, z))
+	var/px = 0
+	for(var/i in 1 to 40)
+		var/target = px + 12
+		var/tiles = round(target / 32)
+		if(tiles > 0)
+			step(B, EAST)
+			target -= 32
+		B.pixel_x = target - 12
+		animate(B, pixel_x = target, time = 1, flags = ANIMATION_END_NOW)
+		px = target
+		sleep(1)
+	del(B)
+	usr << "projectile done"
+
+/mob/player/verb/test_filters()
+	var/list/fs = list(
+		"av_f_outline" = filter(type = "outline", size = 2, color = "#ff0000"),
+		"av_f_shadow" = filter(type = "drop_shadow", x = 2, y = -3, size = 4, offset = 1, color = "#00000080"),
+		"av_f_blur" = filter(type = "blur", size = 3),
+		"av_f_color" = filter(type = "color", color = list(0.5,0,0, 0,1,0, 0,0,1, 0.1,0.2,0.3)),
+		"av_f_alpha" = filter(type = "alpha", icon = icon('test.dmi', "mob"), x = 1, y = 2),
+		"av_f_ripple" = filter(type = "ripple", size = 5, radius = 3),
+		"av_f_wave" = filter(type = "wave", x = 4, size = 2),
+		"av_f_rays" = filter(type = "rays", size = 20, color = "#ffff00"),
+		"av_f_bloom" = filter(type = "bloom", threshold = "#808080", size = 3, offset = 1, alpha = 200),
+		"av_f_displace" = filter(type = "displace", size = 8, icon = icon('test.dmi', "mob")),
+		"av_f_layer" = filter(type = "layer", icon = icon('test.dmi', "mob")),
+		"av_f_motion" = filter(type = "motion_blur", x = 3, y = 1),
+		"av_f_angular" = filter(type = "angular_blur", size = 5),
+		"av_f_radial" = filter(type = "radial_blur", size = 0.1))
+	var/i = 0
+	for(var/n in fs)
+		var/obj/O = new /obj/marker(locate(2 + (i % 7) * 2, y + 2 + round(i / 7) * 2, z))
+		O.name = n
+		O.filters += fs[n]
+		i++
+	usr << "appvars done"
+
+// every drag the client gets, whatever is dragged (mob onto mob as in SS13 stripping)
+/client/MouseDrop(src_object, over_object, src_location, over_location, src_control, over_control, params)
+	world << "CLIENT DROP [src_object] ([src_object:type]) -> [over_object] ([over_object ? over_object:type : "null"]) at [over_location] [params]"
+	..()
+/client/MouseDrag(src_object, over_object, src_location, over_location, src_control, over_control, params)
+	world << "CLIENT DRAG [src_object] -> [over_object]"
+	..()
+/client/MouseDown(object, location, control, params)
+	world << "CLIENT DOWN [object] [params]"
+	..()
+/client/MouseUp(object, location, control, params)
+	world << "CLIENT UP [object] [params]"
+	..()
+/client/Click(object, location, control, params)
+	world << "CLIENT CLICK [object] [params]"
+	..()
+
+// connection topic (byond://host:port?topic) as client/New gets it
+/client/New(TopicData)
+	. = ..()
+	var/t = TopicData
+	spawn(15)
+		src << "TOPIC=\[[t]\]"
