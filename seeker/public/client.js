@@ -192,9 +192,10 @@ function handle(m) {
 			break;
 		case 'sight':
 			if (m.seeInvisible !== undefined) state.seeInvisible = m.seeInvisible;
-			if (m.sight !== undefined) state.sight = m.sight; // SEE_MOBS 4, SEE_OBJS 8, SEE_TURFS 16 (low byte only)
+			if (m.sight !== undefined) state.sight = m.sight; // SEE_MOBS 4, SEE_OBJS 8, SEE_TURFS 16…
+			if (m.clientPixel) state.clientPixel = m.clientPixel; // client.pixel_x/y: shifts the view (render.js camera)
 			break;
-		case 'eye': state.eye = { x: m.x, y: m.y }; break;
+		case 'eye': state.eye = { x: m.x, y: m.y, onMob: m.onMob }; break;
 		case 'turfset': for (const [x, y, id] of m.cells) state.turfs.set(x + ',' + y, id); break;
 		case 'images':
 			for (const id of m.del) { state.images.delete(id); state.vis.delete('image:' + id); }

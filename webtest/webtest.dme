@@ -206,6 +206,25 @@ world
 	verb/test_clientpixel()
 		usr.client.pixel_x = usr.client.pixel_x ? 0 : 16
 
+	// fields of the eye/client update (message 7), one at a time: what the web client's flags2 bits name
+	verb/test_h_clienty()
+		usr.client.pixel_y = usr.client.pixel_y ? 0 : 24
+	verb/test_h_mobpixel()
+		pixel_x = pixel_x ? 0 : 5
+		pixel_w = pixel_w ? 0 : 7
+	verb/test_h_sight()
+		sight = sight & SEE_BLACKNESS ? sight & ~SEE_BLACKNESS : sight | SEE_BLACKNESS
+	verb/test_h_seeinv()
+		see_invisible = see_invisible ? 0 : 45
+	verb/test_h_eyeobj()
+		var/obj/O = locate(/obj) in view(3, src)
+		if(!O)
+			O = new(locate(x + 2, y, z))
+		O.pixel_x = 9
+		O.pixel_w = 3
+		usr.client.eye = usr.client.eye == src ? O : src
+		usr.client.perspective = EYE_PERSPECTIVE
+
 	// samples of runtime icons for working out the DDMI recipe format; their names say what was done
 	verb/test_ddmi()
 		var/list/L = list()

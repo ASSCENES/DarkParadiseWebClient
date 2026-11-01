@@ -260,18 +260,22 @@ function rootPixels(kind, ref, ob) {
 
 function camera(t = performance.now()) {
 	const me = state.me && state.objs.get(state.me), eye = state.eye;
-	const onMe = me && me.z === state.z && me.x !== 0xffff && (!eye || eye.x == null || (Math.abs(me.x - eye.x) <= 1 && Math.abs(me.y - eye.y) <= 1));
+	// the server says whether the eye is our mob (onMob, message 7); without that, a mob next to the eye is taken
+	// for it (the eye update can come a step before the mob's)
+	const near = eye && eye.x != null && Math.abs(me?.x - eye.x) <= 1 && Math.abs(me?.y - eye.y) <= 1;
+	const onMe = me && me.z === state.z && me.x !== 0xffff && (!eye || eye.x == null || (eye.onMob === false ? false : near));
 	// client.pixel_x/y move the view (SS13 shakes the screen by animate()-ing them)
 	const [sx, sy] = clientPixels(t);
 	if (onMe) { const [gx, gy] = glideTiles(me, t); return { cx: me.x, cy: me.y, ox: gx * TILE + sx, oy: gy * TILE + sy }; }
 	if (eye && eye.x != null && eye.y != null) return { cx: eye.x, cy: eye.y, ox: sx, oy: sy };
 	return { cx: state.x0 + Math.floor(state.bufW / 2), cy: state.y0 + Math.floor(state.bufH / 2), ox: sx, oy: sy };
 }
+// client.pixel_x/y as message 7 last set them, or as animate() moves them right now
 function clientPixels(t) {
-	const an = state.anims.get('client');
-	if (!an) return [0, 0];
+	const own = state.clientPixel || [0, 0], an = state.anims.get('client');
+	if (!an) return own;
 	const p = animatedProps(an.tracks, t);
-	if (!p) { state.anims.delete('client'); return [0, 0]; }
+	if (!p) { state.anims.delete('client'); return own; }
 	return [p.x + p.w, p.y + p.z];
 }
 

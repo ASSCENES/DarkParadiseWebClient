@@ -752,11 +752,11 @@ wss.on('connection', (ws, req) => {
 				if (!o) break;
 				const sight = parseSight(d, o.start);
 				if (sight) send({ t: 'sight', ...sight });
-				// header flags 0x02 / 0x04: u16 x / u16 y of client.eye (then a second u16, same so far); the turf
-				// window is centred on it. It moves with our mob, a followed mob, a camera console…
-				const f = d[0];
-				if (f & 0x02) eye.x = d.readUInt16LE(1);
-				if (f & 0x04) eye.y = d.readUInt16LE(f & 0x02 ? 5 : 1);
+				// header flags 0x02 / 0x04: u16 x / u16 y of our mob, then of client.eye (as BYOND's web client reads
+				// them); the turf window is centred on the eye. It moves with our mob, a followed mob, a camera console…
+				const f = d[0], my = { x: eye.myX, y: eye.myY };
+				if (f & 0x02) { my.x = eye.myX = d.readUInt16LE(1); eye.x = d.readUInt16LE(3); }
+				if (f & 0x04) { const at = f & 0x02 ? 5 : 1; my.y = eye.myY = d.readUInt16LE(at); eye.y = d.readUInt16LE(at + 2); }
 				send({ t: 'objs', kind: 'mob', o });
 				for (const e of o.appearance) want(e.appearance);
 				for (const e of o.pos) { mobs.set(e.ref, { ...mobs.get(e.ref), x: e.x, y: e.y }); if (e.ref === me.ref) me.pos = e; wantMob(e.ref); }
@@ -764,14 +764,16 @@ wss.on('connection', (ws, req) => {
 				for (const e of o.del) mobs.delete(e.ref);
 				// A 9 tells which mob is ours only when we did not ask about that mob; after a change of mob (lobby ->
 				// observer, ghosting, body swap) we may already have asked. The eye follows our mob, so a mob standing
-				// right at the eye while our old one is not there is the new one.
+				// right where the header puts our mob while our old one is not there is the new one.
 				if (f & 0x06) {
-					const at = r => { const m = mobs.get(r); return m && m.x === eye.x && m.y === eye.y; };
+					const at = r => { const m = mobs.get(r); return m && m.x === my.x && m.y === my.y; };
 					if (!at(me.ref)) {
 						const here = [...mobs.keys()].filter(at);
 						if (here.length === 1) { me.ref = here[0]; me.app = mobs.get(here[0]).app; send({ t: 'me', ref: me.ref }); }
 					}
-					send({ t: 'eye', x: eye.x, y: eye.y });
+					const h = readSightHeader(d);
+					if (h && h.eyeIsMob !== undefined) eye.onMob = h.eyeIsMob;
+					send({ t: 'eye', x: eye.x, y: eye.y, onMob: eye.onMob });
 				}
 				break;
 			}
@@ -1089,50 +1091,51 @@ wss.on('connection', (ws, req) => {
 // Usual command names for worlds whose verbs are translated (SS1984: "Сказать", "Эмоция", ...)
 const ALIASES = { say: ['Сказать'], me: ['Эмоция'], whisper: ['Шепот'], ooc: ['OOC'], looc: ['LOOC'] };
 
-// Header of message 7 (client/eye update) before the mob sections, as far as it is known (field sizes fitted to
-// headers from a test world with set values and from ss1984; the meaning of most fields is not known yet):
-//   u8 flags; 0x02: u16 ×2; 0x04: u16 ×2; if any of 0x1e: a 22-byte block;
-//   0x08: u16; 0x10: u16; 0x20: u8 sight; 0x40: 9 bytes; 0x80: u8 more flags, then 0x01: u8 see_in_dark,
-//   0x02: u8 see_invisible. Returns null unless the parse ends exactly where the mob sections start.
-function parseSight(d, end) {
-	const f = d[0];
+// Header of message 7 (client/eye update) before the mob sections. Field sizes fitted to headers from a test
+// world with set values (test-h-* verbs) and from ss1984; the second flags byte as BYOND's own web client reads
+// the same message (webclient.dart.js, processMovableChangeMessage):
+//   u8 flags; 0x02: u16 ×2; 0x04: u16 ×2; if any of 0x1e: a 22-byte block whose first byte says whether the eye
+//   is our mob (0: 5 more bytes follow, the eye atom: u8 type, u32 ref); 0x08: u16; 0x10: u16; 0x20: u8 sight;
+//   0x40: 9 bytes; 0x80: u8 more flags, then 0x01: u8 see_in_dark, 0x02: u8 see_invisible, 0x04: u32 sight,
+//   0x08: i16 ×4 (eye pixel_x/y/w/z), 0x10: i16 ×2 client.pixel_x/y, 0x20: i16 ×4, 0x40: 8 bytes.
+// Returns { end, sight… } with end where the mob sections start, or null when the header has unknown fields.
+function readSightHeader(d) {
+	const f = d[0], out = {};
 	let o = 1;
 	if (f & 0x02) o += 4;
 	if (f & 0x04) o += 4;
-	if (f & 0x1e) o += 22;
+	if (f & 0x1e) { out.eyeIsMob = d[o] !== 0; o += out.eyeIsMob ? 22 : 27; }
 	if (f & 0x08) o += 2;
 	if (f & 0x10) o += 2;
-	const out = {};
 	if (f & 0x20) out.sight = d[o++];
 	if (f & 0x40) o += 9;
 	if (f & 0x80) {
 		const g = d[o++];
+		if (g & ~0x7f) return null;
 		if (g & 0x01) out.seeInDark = d[o++];
 		if (g & 0x02) out.seeInvisible = d[o++];
-		if (g & ~0x03) return out.seeInvisible === undefined ? null : out; // later fields unknown: trust what came first
+		if (g & 0x04) { out.sight = d.readUInt32LE(o); o += 4; }
+		if (g & 0x08) o += 8;
+		if (g & 0x10) { out.clientPixel = [d.readInt16LE(o), d.readInt16LE(o + 2)]; o += 4; }
+		if (g & 0x20) o += 8;
+		if (g & 0x40) o += 8;
 	}
-	return o === end && Object.keys(out).length ? out : null;
+	if (o > d.length) return null;
+	out.end = o;
+	return out;
 }
-
-// Where the mob block of a type 7 message starts, from its header flags (as parseSight walks them); null when
-// the header has fields not known yet.
+// see_in_dark, see_invisible, sight and client.pixel_x/y from message 7 when its header reads to where the mob
+// sections were found
+function parseSight(d, end) {
+	const h = readSightHeader(d);
+	if (!h || h.end !== end) return null;
+	const { end: _end, eyeIsMob: _eye, ...out } = h;
+	return Object.keys(out).length ? out : null;
+}
+// Where the mob block of a type 7 message starts, from its header flags; null when they are not all known
 function sightHeaderEnd(d) {
-	const f = d[0];
-	let o = 1;
-	if (f & 0x02) o += 4;
-	if (f & 0x04) o += 4;
-	if (f & 0x1e) o += 22;
-	if (f & 0x08) o += 2;
-	if (f & 0x10) o += 2;
-	if (f & 0x20) o++;
-	if (f & 0x40) o += 9;
-	if (f & 0x80) {
-		const g = d[o++];
-		if (g & ~0x03) return null;
-		if (g & 0x01) o++;
-		if (g & 0x02) o++;
-	}
-	return o < d.length ? o : null;
+	const h = readSightHeader(d);
+	return h && h.end <= d.length ? h.end : null;
 }
 
 // Reads n zero-terminated UTF-8 strings from offset; returns them followed by the offset after the last one.
