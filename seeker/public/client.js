@@ -1020,7 +1020,9 @@ function frameRect(ic, iconState, dir, t, once = false, since = 0) {
 		frame = seq[k];
 	}
 	const idx = st.offset + frame * st.dirs + Math.min(di, st.dirs - 1);
-	return { sx: (idx % meta.cols) * meta.width, sy: Math.floor(idx / meta.cols) * meta.height, w: meta.width, h: meta.height, done };
+	// (a plain image has no columns in its description: older gateways leave cols out)
+	const cols = meta.cols || 1;
+	return { sx: (idx % cols) * meta.width, sy: Math.floor(idx / cols) * meta.height, w: meta.width, h: meta.height, done };
 }
 
 // color: [r, g, b, a] multiply; cached per frame

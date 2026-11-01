@@ -19,7 +19,8 @@ function readDmiMeta(png) {
 
 function parseDescription(desc, pngW, pngH) {
 	const meta = { width: 32, height: 32, pngW, pngH, states: [] };
-	if (!desc) { meta.width = pngW; meta.height = pngH; meta.states.push({ name: '', dirs: 1, frames: 1, delay: [], offset: 0 }); return meta; }
+	// a plain image (no DMI description, e.g. a title screen PNG): one state, one frame, the whole picture
+	if (!desc) { meta.width = pngW; meta.height = pngH; meta.cols = 1; meta.states.push({ name: '', dirs: 1, frames: 1, delay: [], offset: 0 }); return meta; }
 	let cur = null, offset = 0;
 	for (const raw of desc.split('\n')) {
 		const m = raw.trim().match(/^(\w+)\s*=\s*(.*)$/);

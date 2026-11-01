@@ -291,7 +291,29 @@ wss.on('connection', (ws, req) => {
 	const sid = nextSid++;
 	const sess = { server: target, assets: new Map(), windows: new Set(), files: new Map(), aliases: new Map() };
 	const transfers = new Map(); // crc -> { name, size, action, chunks }
-	sess.topic = q => conn.send(129, Buffer.from(q + '\0', 'utf8'));
+	// Topics go out at most TOPIC_RATE a second, and the same one again within a second is dropped: SS13 worlds
+	// ignore a client's 11th Topic in a second ("слишком много действий за секунду"), and at login the stat
+	// panel answers each of several init_verbs with a Send-Tabs per tab, dozens at once. Nothing else is lost,
+	// it only waits its turn.
+	const TOPIC_RATE = 8;
+	const topicQueue = [], topicSent = [];
+	let topicTimer = null;
+	const pumpTopics = () => {
+		topicTimer = null;
+		const now = Date.now();
+		while (topicSent.length && now - topicSent[0] >= 1000) topicSent.shift();
+		while (topicQueue.length && topicSent.length < TOPIC_RATE) {
+			if (conn) conn.send(129, Buffer.from(topicQueue.shift() + '\0', 'utf8'));
+			else topicQueue.shift();
+			topicSent.push(now);
+		}
+		if (topicQueue.length) topicTimer = setTimeout(pumpTopics, 1000 - (now - topicSent[0]) + 5);
+	};
+	sess.topic = q => {
+		if (topicQueue.includes(q)) return; // the same one still waiting
+		topicQueue.push(q);
+		if (!topicTimer) pumpTopics();
+	};
 	sess.resource = i => map.resources[i];
 	// Every page logs in with the same guest key, and the server drops the older login, sometimes without saying
 	// so (no message 0): that page would reconnect and drop the newer one, over and over, across browsers.
@@ -1018,8 +1040,7 @@ wss.on('connection', (ws, req) => {
 		} else if (m.t === 'verb' && typeof m.name === 'string') {
 			callVerb(m.name, Array.isArray(m.args) ? m.args : []);
 		} else if (m.t === 'topic' && typeof m.href === 'string') {
-			const q = m.href.replace(/^byond:\/\//, '');
-			conn.send(129, Buffer.from(q + '\0', 'utf8'));
+			sess.topic(m.href.replace(/^byond:\/\//, ''));
 		} else if (m.t === 'drag' && m.src) {
 			// MouseDrag (0x93) while the button is held, MouseDrop (0x92) on release: u16 7, verb id 0x8B + event
 			// code (8 drag, 7 drop; u32 when the world has wide verb ids, as Paradise), a null src (00, u32 0xffff),

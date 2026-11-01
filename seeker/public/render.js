@@ -123,13 +123,14 @@ function collect(list, appId, base, px, py, dir, parentLayer, plane, order, dept
 	// an overlay's pixel_w/z shift it after its atom's transform, unturned and unscaled (Paradise's hitscan beams
 	// put their sprite at the beam's midpoint so, then stretch and turn the atom); pixel_x/y turn with the atom
 	const ws = depth > 0 ? [(sw ? sw[0] : 0) + (a.pixel_w || 0), (sw ? sw[1] : 0) + (a.pixel_z || 0)] : null;
-	for (const u of a.underlays) collect(list, u, base, px, py, d, ownLayer, pl, order - 0.001, depth + 1, r, mx, mine, ws);
+	// overlays and underlays sit where their atom is drawn, its own pixel offsets included
+	for (const u of a.underlays) collect(list, u, base, at.px, at.py, d, ownLayer, pl, order - 0.001, depth + 1, r, mx, mine, ws);
 	// flick() replaces the atom's own icon_state (not its overlays) for one run of the animation
 	const fl = depth === 0 && base.ref !== undefined && !base.image && state.flicks.get(base.kind + ':' + base.ref);
 	const shown = fl ? { ...a, icon_state: fl.state, iconRsc: fl.iconRsc || a.iconRsc } : a;
 	// mouse_opacity is the atom's: its overlays are as clickable as the atom itself
 	list.push({ a: shown, base, px: at.px, py: at.py, dir: d, layer: ownLayer, plane: pl, order, flick: fl || null, tf: mx, rpx: r.px, rpy: r.py, mo: r.mo, rgba, blend, fx, wx: ws ? ws[0] : 0, wy: ws ? ws[1] : 0 });
-	for (const o of a.overlays) collect(list, o, base, px, py, d, ownLayer, pl, order + 0.001, depth + 1, r, mx, mine, ws);
+	for (const o of a.overlays) collect(list, o, base, at.px, at.py, d, ownLayer, pl, order + 0.001, depth + 1, r, mx, mine, ws);
 }
 
 // The tile the view is centred on, and (ox, oy) pixels the view still trails behind it while our mob slides.
