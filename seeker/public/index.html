@@ -45,6 +45,8 @@
 	#lightbtn { position: absolute; right: 8px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
 	#lightbtn.off, #soundbtn.off, #shadowbtn.off, #popbtn.off { color: var(--muted); text-decoration: line-through; }
 	#popbtn { position: absolute; right: 214px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#recbtn { position: absolute; left: 8px; top: 34px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#recbtn.on { color: #fff; background: #b3261e; border-color: #ff5c5c; }
 	#notice { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 40; display: none; max-width: min(520px, calc(100vw - 32px)); padding: 8px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); font-size: 13px; cursor: pointer; }
 	#shadowbtn { position: absolute; right: 148px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
 	#soundbtn { position: absolute; right: 78px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
@@ -95,7 +97,7 @@
 </head>
 <body>
 <div id="app">
-	<div id="mapwrap"><canvas id="map"></canvas><iframe id="title" title="Лобби"></iframe><div id="status">подключение…</div><button id="lightbtn" title="Освещение вкл/выкл">☀ свет</button><button id="soundbtn" title="Звук вкл/выкл">♪ звук</button><button id="shadowbtn" title="Тени под объектами (ambient occlusion): красивее, но тяжелее">◐ тени</button><button id="popbtn" title="Окна tgui и браузера — отдельными окнами (нужно разрешить всплывающие окна)">⧉ окна</button></div>
+	<div id="mapwrap"><canvas id="map"></canvas><iframe id="title" title="Лобби"></iframe><div id="status">подключение…</div><button id="lightbtn" title="Освещение вкл/выкл (отладка, только для админов шлюза)" style="display:none">☀ свет</button><button id="soundbtn" title="Звук вкл/выкл">♪ звук</button><button id="shadowbtn" title="Тени под объектами (ambient occlusion): красивее, но тяжелее">◐ тени</button><button id="popbtn" title="Окна tgui и браузера — отдельными окнами (нужно разрешить всплывающие окна)">⧉ окна</button></div>
 	<div id="side">
 		<iframe id="statpane" title="Статпанель"></iframe>
 		<iframe id="chatpane" title="Чат"></iframe>

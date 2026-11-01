@@ -29,6 +29,17 @@ function serverAddress(text) {
 	return m && +m[2] > 0 && +m[2] < 65536 ? m[1].toLowerCase() + ':' + +m[2] : null;
 }
 const httpPort = +opt('port', 8080);
+// Debug mode (lighting switch, recording a session for bug reports) is for the gateway's admins: a page opened on
+// this machine itself, or one that knows the admin token (--admin-token or SEEKER_ADMIN_TOKEN; the page is
+// opened once with ?admin=<token> and keeps it). Players never get it.
+const adminToken = opt('admin-token', process.env.SEEKER_ADMIN_TOKEN || '');
+function isAdminPage(req, given) {
+	const local = /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '') && !req.headers['x-forwarded-for'] && !req.headers['x-real-ip'];
+	if (local) return true;
+	if (!adminToken || typeof given !== 'string' || given.length !== adminToken.length) return false;
+	return require('crypto').timingSafeEqual(Buffer.from(given), Buffer.from(adminToken));
+}
+const RECORDS = path.join(__dirname, 'records');
 const rscFiles = optAll('rsc');
 
 // Type 26 login payload DreamSeeker sends with no BYOND pager running (guest login).
@@ -495,10 +506,32 @@ wss.on('connection', (ws, req) => {
 	}
 	sessions.set(sid, sess);
 	send({ t: 'session', sid });
+	// admins (see isAdminPage) get the debug mode; a recording keeps every message to and from the server
+	const admin = isAdminPage(req, wsQuery.get('admin'));
+	send({ t: 'debug', allowed: admin });
+	let rec = null; // { started, items: [[ms, 'in'|'out', type, hex]], bytes }
+	const record = (dir, type, d) => {
+		if (!rec) return;
+		const hex = d ? d.toString('hex') : '';
+		rec.bytes += hex.length;
+		if (rec.bytes > 200e6) return; // a recording that ran for hours stops growing
+		rec.items.push([Date.now() - rec.started, dir, type, hex]);
+	};
+	sess.recordStart = () => { rec = { started: Date.now(), items: [], bytes: 0 }; };
+	sess.recordStop = () => {
+		const r = rec; rec = null;
+		if (!r) return null;
+		const out = { server: target, sid, started: new Date(r.started).toISOString(), wideVerbs: map.wideVerbs, messages: r.items };
+		// a copy stays with the gateway too (records/), for when the page could not save it
+		try { fs.mkdirSync(RECORDS, { recursive: true }); fs.writeFileSync(path.join(RECORDS, 'seeker-' + r.started + '-' + sid + '.json'), JSON.stringify(out)); } catch (_) {}
+		return out;
+	};
 	let nines = 0;
 
 	function openConn() {
 		const c = conn = new ByondConnection(ddHost, +ddPort);
+		const rawSend = c.send.bind(c);
+		c.send = (type, data) => { record('out', type, data); return rawSend(type, data); };
 		let topic = '';
 		c.on('ready', info => {
 			map.wideVerbs = info.wideVerbs;
@@ -523,6 +556,7 @@ wss.on('connection', (ws, req) => {
 	function onMessage(type, d) {
 		if (process.env.SEEKER_DUMP)
 			fs.appendFileSync(process.env.SEEKER_DUMP, JSON.stringify({ sid, t: Date.now(), type, hex: d.toString('hex') }) + '\n');
+		record('in', type, d);
 		if (process.env.SEEKER_DEBUG && ![106, 38, 14].includes(type))
 			console.log('[' + sid + '] <<', type, d.length, JSON.stringify(d.subarray(0, 120).toString('utf8').replace(/[\x00-\x1f]/g, '|')));
 		try { handle(type, d); } catch (err) {
@@ -1076,6 +1110,9 @@ wss.on('connection', (ws, req) => {
 				const onMob = mobApp && mobApp.verbs && mobApp.verbs.includes(m.id);
 				sendVerb(m.id, onMob ? 2 : 8, onMob ? me.ref : 1, [atomArg(m.atom.type, m.atom.ref)]);
 			}
+		} else if (m.t === 'record' && admin) {
+			if (m.on) sess.recordStart();
+			else send({ t: 'recorded', data: sess.recordStop() });
 		} else if (m.t === 'icon' && /^[0-9a-f]{1,8}$/.test(m.id || '')) {
 			// Icons over the page socket: as many at once as the map needs (a browser opens only ~6 HTTP
 			// connections to a site, and one waiting for a resource the server is still sending holds one up).

@@ -2,3 +2,4 @@ seeker/cache/
 seeker/node_modules/
 *.log
 *.jsonl
+seeker/records/

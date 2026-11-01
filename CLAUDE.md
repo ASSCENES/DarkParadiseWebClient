@@ -41,6 +41,11 @@ DreamSeeker. Пользователь общается по-русски; отв
 
 ## Инструменты отладки
 
+- **Запись сессии** (кнопка «⏺ запись», только админам шлюза: страница с localhost без прокси-заголовков или
+  `?admin=<токен>`, `isAdminPage` в server.js). Файл `seeker-record-*.json`: `server.messages` —
+  `[мс, 'in'|'out', тип, hex]` всего обмена с игровым сервером (как SEEKER_DUMP, но по кнопке и с исходящими),
+  `page` — `[мс, 'gw'|'page'|'console.error'|…, данные]`, `snapshots` — `renderDump()` каждые 5 с, `mouse`.
+  Копия у шлюза в `records/`. Разбирать так же, как дампы: проиграть `messages` через `MapState`/парсеры `proto/`.
 - `GET http://127.0.0.1:<порт>/__dump` (только с localhost) — шлюз спрашивает у открытых страниц их состояние
   (`renderDump()` в render.js): камера, eye, моб, z, sight, planes/masters, последние 30 действий мыши
   (`mouseLog`), PNG-снимок сцены (`snapshot`, data URL).

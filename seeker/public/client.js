@@ -33,9 +33,20 @@ const pageServer = new URLSearchParams(location.search).get('server');
 const LOGIN = 'seekerLogin';
 let loginParams = '';
 try { loginParams = (JSON.parse(sessionStorage.getItem(LOGIN)) || {})[pageServer] || ''; } catch (_) {}
-const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' +
-	(pageServer ? '?server=' + encodeURIComponent(pageServer) : '') +
-	(loginParams ? (pageServer ? '&' : '?') + 'login=' + encodeURIComponent(loginParams) : ''));
+// The gateway's admin token (debug mode): given once as ?admin=<token>, kept in this browser, taken out of the
+// address so it does not end up in screenshots or shared links
+let adminToken = '';
+try {
+	const u = new URL(location.href), given = u.searchParams.get('admin');
+	if (given !== null) {
+		if (given) localStorage.setItem('seekerAdmin', given); else localStorage.removeItem('seekerAdmin');
+		u.searchParams.delete('admin');
+		history.replaceState(null, '', u.pathname + u.search + u.hash);
+	}
+	adminToken = localStorage.getItem('seekerAdmin') || '';
+} catch (_) {}
+const wsArgs = [pageServer && 'server=' + encodeURIComponent(pageServer), loginParams && 'login=' + encodeURIComponent(loginParams), adminToken && 'admin=' + encodeURIComponent(adminToken)].filter(Boolean);
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (wsArgs.length ? '?' + wsArgs.join('&') : ''));
 ws.onopen = () => setStatus('рукопожатие…');
 
 // Every tab logs in with the same guest key, and a new login makes the server drop the previous one. Two tabs
@@ -157,11 +168,73 @@ ws.onclose = () => {
 ws.binaryType = 'arraybuffer';
 ws.onmessage = e => {
 	if (e.data instanceof ArrayBuffer) return void iconArrived(e.data); // an icon asked for over the socket
+	if (pageRec && e.data.length < 2e6) pageRec.push([Math.round(performance.now() - pageRec.t0), 'gw', e.data]);
 	const m = JSON.parse(e.data);
 	if (Array.isArray(m)) for (const x of m) handle(x); else handle(m); // a batch: one server tick
 };
 
 function setStatus(t) { statusEl.textContent = t; }
+
+// ---------- debug mode (the gateway's admins only) ----------
+// Players have no lighting switch (it would be a fullbright); admins have it and "⏺ запись": a recording of the
+// session for bug reports. The gateway keeps every message to and from the game server; the page keeps what it
+// got from the gateway and sent to it, its errors, mouse actions and a state snapshot every few seconds. Stopping
+// saves one file with both (the gateway also keeps a copy in its records/ folder).
+let debugAllowed = false, pageRec = null, pageRecTimer = null;
+function setDebugMode(on) {
+	debugAllowed = on;
+	document.getElementById('lightbtn').style.display = on ? 'inline-block' : 'none';
+	if (!on) state.lighting = true;
+	let b = document.getElementById('recbtn');
+	if (on && !b) {
+		b = Object.assign(document.createElement('button'), { id: 'recbtn', textContent: '⏺ запись', title: 'Записать всё для отладки (только для админов шлюза)' });
+		b.onclick = () => (pageRec ? stopRecording() : startRecording());
+		document.getElementById('mapwrap').appendChild(b);
+	}
+	if (b) b.style.display = on ? 'inline-block' : 'none';
+}
+const sendToGateway = ws.send.bind(ws);
+ws.send = data => {
+	if (pageRec && typeof data === 'string') pageRec.push([Math.round(performance.now() - pageRec.t0), 'page', data]);
+	return sendToGateway(data);
+};
+for (const level of ['error', 'warn']) {
+	const orig = console[level].bind(console);
+	console[level] = (...a) => { if (pageRec) pageRec.push([Math.round(performance.now() - pageRec.t0), 'console.' + level, a.map(x => x instanceof Error ? x.stack : String(x)).join(' ')]); orig(...a); };
+}
+addEventListener('error', e => { if (pageRec) pageRec.push([Math.round(performance.now() - pageRec.t0), 'error', String(e.error && e.error.stack || e.message)]); });
+function startRecording() {
+	if (!debugAllowed) return;
+	pageRec = Object.assign([], { t0: performance.now(), started: new Date().toISOString(), snapshots: [] });
+	let n = 0;
+	const snap = () => { try { const d = renderDump(); if (n++ % 6) delete d.snapshot; pageRec.snapshots.push([Math.round(performance.now() - pageRec.t0), d]); } catch (err) { pageRec.push([0, 'error', String(err.stack)]); } };
+	snap();
+	pageRecTimer = setInterval(snap, 5000); // a picture of the map every 30 s
+	ws.send(JSON.stringify({ t: 'record', on: true }));
+	const b = document.getElementById('recbtn');
+	b.textContent = '⏹ стоп'; b.classList.add('on');
+}
+function stopRecording() {
+	clearInterval(pageRecTimer);
+	try { pageRec.snapshots.push([Math.round(performance.now() - pageRec.t0), renderDump()]); } catch (_) {}
+	ws.send(JSON.stringify({ t: 'record', on: false }));
+	const b = document.getElementById('recbtn');
+	b.textContent = '… сохраняю'; b.classList.remove('on');
+}
+function saveRecording(server) {
+	const page = pageRec;
+	pageRec = null;
+	const b = document.getElementById('recbtn');
+	if (b) b.textContent = '⏺ запись';
+	if (!page) return;
+	const file = { seeker: 1, started: page.started, url: location.href, userAgent: navigator.userAgent, screen: [innerWidth, innerHeight, devicePixelRatio],
+		page: page.slice(), snapshots: page.snapshots, mouse: typeof mouseLog !== 'undefined' ? mouseLog : null, server };
+	const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([JSON.stringify(file)], { type: 'application/json' })),
+		download: 'seeker-record-' + page.started.replace(/[:.]/g, '-') + '.json' });
+	document.body.appendChild(a); a.click(); a.remove();
+	setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+	notice('Запись сохранена: файл ' + a.download + ' (копия у шлюза в папке records)');
+}
 
 // The map column takes the width the view needs at the window's height; the side panel (chat) gets the rest.
 function fitLayout() {
@@ -257,6 +330,8 @@ function handle(m) {
 			}
 			break;
 		case 'session': state.sid = m.sid; break;
+		case 'debug': setDebugMode(!!m.allowed); break;
+		case 'recorded': saveRecording(m.data); break;
 		case 'mapstyle': setMapStyle(m.css); break;
 		case 'dump': { // debugging aid: the gateway's /__dump asks what this page draws
 			let data;

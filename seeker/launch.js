@@ -47,7 +47,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 	// The gateway restarts on its own when it exits (e.g. killed to load new code); the round keeps running.
 	let gw;
 	const startGateway = () => {
-		gw = spawn(process.execPath, [path.join(__dirname, 'server.js'), ...(ddAddr ? ['--dd', ddAddr] : []), '--port', String(cfg.webPort), ...rsc.flatMap(f => ['--rsc', f])], { stdio: 'inherit' });
+		// "adminToken": the gateway's admins open the page once with ?admin=<token> (debug mode: see server.js)
+		gw = spawn(process.execPath, [path.join(__dirname, 'server.js'), ...(ddAddr ? ['--dd', ddAddr] : []), '--port', String(cfg.webPort), ...rsc.flatMap(f => ['--rsc', f]),
+			...(cfg.adminToken ? ['--admin-token', String(cfg.adminToken)] : [])], { stdio: 'inherit' });
 		gw.on('exit', code => { console.log('Шлюз завершился (' + code + '), перезапуск…'); setTimeout(startGateway, 1000); });
 	};
 	startGateway();
