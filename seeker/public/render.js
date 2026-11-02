@@ -522,7 +522,7 @@ function render(t) {
 		(d.plane > planes.lighting ? above : below).push(d);
 	}
 	drawPlates(below, at, t, out);
-	if (state.lighting !== false && planes.lightAlpha > 0 && lights.some(d => d.plane === planes.lighting)) drawLighting(lights, at, t);
+	if (state.lighting !== false && planes.lightAlpha > 0 && lights.some(d => d.plane === planes.lighting)) drawLighting(lights, at, t, ox, oy);
 	drawPlates(above, at, t, out);
 	ctx.restore();
 
@@ -1102,8 +1102,41 @@ function lightBlit(g, src, d, vx, vy, rect, h) {
 
 // The light layer is drawn at icon resolution (1 pixel per icon pixel) and stretched with smoothing over the
 // view: lighting is all soft gradients, and the small layer is several times cheaper to fill.
-function drawLighting(lights, at, t) {
-	const s = 1, w = Math.ceil(viewport.w / viewport.scale), h = Math.ceil(viewport.h / viewport.scale);
+// The layer is laid out against the camera's whole tile (ox/oy, the slide, are taken out) with a tile to spare
+// on every side, and moved by the slide as it is drawn. It is rebuilt only when what it shows changes (a cheap
+// signature of every light and glow: appearance, place, frame): lights change seldom, while the view slides
+// every frame of a step, and rebuilding it each frame cost about a third of the frame.
+const LIGHT_MARGIN = TILE;
+let lightSignature = null;
+const appKeys = new WeakMap();
+let nextAppKey = 1;
+const appKey = a => { let k = appKeys.get(a); if (!k) appKeys.set(a, k = nextAppKey++); return k; };
+function drawLighting(lights, at, t, ox = 0, oy = 0) {
+	const s = 1, M = LIGHT_MARGIN, vw = Math.ceil(viewport.w / viewport.scale), vh = Math.ceil(viewport.h / viewport.scale);
+	const w = vw + 2 * M, h = vh + 2 * M;
+	// places against the whole tile, shifted into the margin
+	const at0 = d => { const [x, y] = at(d); return [x + ox + M, y + oy + M]; };
+	let sig = w * 7 + h;
+	for (const d of lights) {
+		const a = d.a, ic = a.iconRsc && getIcon(a.iconRsc);
+		const rect = ic && frameRect(ic, a.icon_state, d.dir, t, false, d.base.since || 0);
+		const [x, y] = at0(d), col = d.rgba;
+		sig = (Math.imul(sig, 31) + appKey(a) * 131 + Math.round(x) * 7 + Math.round(y) * 13 + (rect ? rect.sx * 3 + rect.sy * 5 : 1) + (col ? col[0] + col[1] * 3 + col[2] * 5 + col[3] * 7 : 0)) | 0;
+	}
+	if (sig !== lightSignature || lightCanvas.width !== w || lightCanvas.height !== h) {
+		lightSignature = sig;
+		buildLightLayer(lights, at0, t, w, h, s);
+	}
+	ctx.globalCompositeOperation = 'multiply';
+	ctx.globalAlpha = planes.lightAlpha;
+	ctx.imageSmoothingEnabled = true;
+	const sc = viewport.scale;
+	ctx.drawImage(lightCanvas, viewport.x + (-M - ox) * sc, viewport.y + (-M + oy) * sc, w * sc, h * sc);
+	ctx.imageSmoothingEnabled = false;
+	ctx.globalAlpha = 1;
+	ctx.globalCompositeOperation = 'source-over';
+}
+function buildLightLayer(lights, at, t, w, h, s) {
 	if (lightCanvas.width !== w || lightCanvas.height !== h) { lightCanvas.width = w; lightCanvas.height = h; }
 	lightCtx.globalCompositeOperation = 'source-over';
 	lightCtx.imageSmoothingEnabled = true; // light gradients are meant to be smooth
@@ -1112,8 +1145,7 @@ function drawLighting(lights, at, t) {
 	const glows = [];
 	for (const d of lights) {
 		if (d.plane !== planes.lighting) { glows.push(d); continue; }
-		// whole pixels: while the view slides by a fraction of a pixel, smoothed tile edges would leave a grid of
-		// seams in the dark; all tiles share that fraction, so rounded they still meet edge to edge
+		// whole pixels: smoothed tile edges at fractions of a pixel would leave a grid of seams in the dark
 		const [fx, fy] = at(d), vx = Math.round(fx), vy = Math.round(fy);
 		const a = d.a;
 		const dx = vx * s, dy = h - (vy + TILE) * s;
@@ -1155,13 +1187,6 @@ function drawLighting(lights, at, t) {
 		lightCtx.drawImage(glowCanvas, 0, 0);
 		lightCtx.globalCompositeOperation = 'source-over';
 	}
-	ctx.globalCompositeOperation = 'multiply';
-	ctx.globalAlpha = planes.lightAlpha;
-	ctx.imageSmoothingEnabled = true;
-	ctx.drawImage(lightCanvas, viewport.x, viewport.y, w * viewport.scale, h * viewport.scale);
-	ctx.imageSmoothingEnabled = false;
-	ctx.globalAlpha = 1;
-	ctx.globalCompositeOperation = 'source-over';
 }
 
 // ---------- mouse ----------
