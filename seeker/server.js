@@ -164,6 +164,23 @@ function fetchResource(id, ms = 20000) {
 }
 
 // ---------- http ----------
+// A body, gzipped when the browser takes it and it is worth it (text, fonts); packed copies are kept by key
+// (resource id) or by buffer, the last 64
+const gzipped = new Map();
+function sendBody(req, res, headers, data, packable, key = data) {
+	if (packable && data.length > 1024 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+		let gz = gzipped.get(key);
+		if (!gz || gz.size !== data.length) {
+			gz = Object.assign(zlib.gzipSync(data, { level: 6 }), { size: data.length });
+			gzipped.set(key, gz);
+			if (gzipped.size > 64) gzipped.delete(gzipped.keys().next().value);
+		}
+		res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding', 'Content-Length': gz.length });
+		return res.end(gz);
+	}
+	res.writeHead(200, { ...headers, 'Content-Length': data.length });
+	return res.end(data);
+}
 const PUBLIC = path.join(__dirname, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 // Browser windows load their files by name; names are registered per session by message 254.
@@ -219,14 +236,20 @@ const server = http.createServer(async (req, res) => {
 			const id = sess && sess.assets.get(name);
 			return sent ? { data: sent } : id !== undefined && fetchResource(id);
 		};
-		let e = await lookup();
-		// tgui may ask for a file before the server's asset/mappings message arrives: give it a moment
-		for (let i = 0; !e && sess && i < 10; i++) { await new Promise(r => setTimeout(r, 200)); e = await lookup(); }
+		// tgui may ask for a file before the server's asset/mappings message names it: give that a moment. A file
+		// the server has named but not sent is waited for once (fetchResource), not again on every retry: that
+		// held a browser connection for minutes and stalled every other window's scripts behind it.
+		const known = () => sess && (sess.files.has(want) || sess.assets.has(want) || sess.aliases.has(want));
+		for (let i = 0; !known() && sess && i < 10; i++) await new Promise(r => setTimeout(r, 200));
+		const e = await lookup();
 		if (!e) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); } // may appear in .dyn.rsc soon
 		const ext = path.extname(am[2]).toLowerCase();
 		const types = { '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.html': 'text/html', '.ttf': 'font/ttf', '.woff2': 'font/woff2', '.woff': 'font/woff', '.svg': 'image/svg+xml', '.json': 'application/json' };
-		res.writeHead(200, { 'Content-Type': (types[ext] || 'application/octet-stream') + (/^\.(js|css|html)$/.test(ext) ? '; charset=utf-8' : '') });
-		return res.end(e.data);
+		// Every tgui window loads tgui.bundle.js (2.5 MB), its CSS and fonts: kept by the browser (the session's
+		// address in the path keeps another session's files apart) and sent gzipped, once
+		const headers = { 'Content-Type': (types[ext] || 'application/octet-stream') + (/^\.(js|css|html)$/.test(ext) ? '; charset=utf-8' : ''),
+			'Cache-Control': /^asset\.[0-9a-f]{32}\./.test(want) ? 'max-age=31536000, immutable' : 'max-age=3600' };
+		return sendBody(req, res, headers, e.data, /^\.(js|css|html|json|svg|ttf)$/.test(ext), e.id !== undefined ? 'res:' + e.id : e.data);
 	}
 	// sounds (and any other resource) by .rsc id; the type is sniffed from the file's first bytes
 	const sm = url.pathname.match(/^\/res\/([0-9a-f]+)$/);
