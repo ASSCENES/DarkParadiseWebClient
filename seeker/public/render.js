@@ -311,7 +311,9 @@ function parseScreenLoc(loc, vw, vh) {
 		if (parts.length === 1) parts = [parts[0], parts[0]];
 		if (VERT.test(parts[0].trim()) && !VERT.test(parts[1].trim())) parts = [parts[1], parts[0]];
 		const x = axis(parts[0], true), y = axis(parts[1], false);
-		return x === null || y === null ? null : { x, y };
+		// placed from the top edge (NORTH/TOP): DreamSeeker lines the icon's top edge up with that tile's top,
+		// whatever the icon's height (Dark Paradise's lobby menu); other places put its bottom edge there
+		return x === null || y === null ? null : { x, y, top: /^\s*(NORTH|TOP)/i.test(parts[1]) };
 	};
 	const [from, to] = loc.split(/\s+to\s+/i);
 	const a = point(from);
@@ -658,7 +660,10 @@ function screenDrawables(vw, vh, want) {
 			const vk = (v.type === 3 ? 'mob:' : 'obj:') + v.ref, still = !animMovesPixels(vk);
 			collect(tmp, vo.app, { kind: v.type === 3 ? 'mob' : 'obj', ref: v.ref, screen: true, vis: true }, still ? vo.px : 0, still ? vo.py : 0, vo.dir, a.layer, plane, hud.length + tmp.length);
 		}
-		for (const p of at) for (const d of tmp) hud.push({ ...d, sx: p.x, sy: p.y });
+		// placed from the top: the object's own icon hangs down from the top of its tile (see parseScreenLoc)
+		const ic = at.some(p => p.top) && a.iconRsc ? getIcon(a.iconRsc) : null;
+		const drop = ic && ic.meta ? TILE - ic.meta.height : 0;
+		for (const p of at) for (const d of tmp) hud.push({ ...d, sx: p.x, sy: p.y + (p.top ? drop : 0) });
 	}
 	return hud.sort((p, q) => (p.plane - q.plane) || (p.layer - q.layer) || (p.order - q.order));
 }
@@ -856,10 +861,15 @@ function applyCss(s2, css) {
 	if (!css) return;
 	const prop = name => (css.match(new RegExp('(?:^|;)\\s*' + name + '\\s*:\\s*([^;]+)', 'i')) || [])[1];
 	if (prop('color')) s2.color = prop('color').trim();
+	// maptext sizes: px come out about as big as pt in DreamSeeker (SS13 ghost and LOOC runechat ask for 6px and is
+	// as readable as the 6pt default there), so both count as points here
 	const size = (prop('font-size') || '').match(/([\d.]+)\s*(pt|px)/i);
-	if (size) s2.size = size[2].toLowerCase() === 'pt' ? +size[1] * 4 / 3 : +size[1];
-	if (prop('font-family')) s2.family = prop('font-family').split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+	if (size) s2.size = +size[1] * 4 / 3;
+	const family = prop('font-family') && prop('font-family').split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+	// MS Serif is a Windows bitmap font browsers do not have: the map's own pixel font stands in for it
+	if (family) s2.family = /^ms serif$/i.test(family) ? s2.family : family;
 	if (prop('text-align')) s2.align = prop('text-align').trim();
+	if (prop('vertical-align')) s2.valign = prop('vertical-align').trim().toLowerCase();
 	const weight = prop('font-weight');
 	if (weight) s2.bold = /bold|[6-9]00/.test(weight);
 	if (/italic/.test(prop('font-style') || '')) s2.italic = true;
@@ -939,8 +949,9 @@ const maptextFont = st => (st.italic ? 'italic ' : '') + (st.bold ? 'bold ' : ''
 	(st.family ? '"' + st.family.replace(/"/g, '') + '", ' : '') + 'Verdana, sans-serif';
 function layoutMaptext(html, boxW) {
 	const g = measureCtx, out = [];
-	let y = 0, widest = 0;
+	let y = 0, widest = 0, valign = null;
 	for (const line of maptextRuns(html)) {
+		valign = valign || (line[0] && line[0].st.valign) || null;
 		const rows = [[]];
 		let rowW = 0;
 		for (const run of line) for (const word of run.text.split(/(?<= )/)) {
@@ -961,7 +972,7 @@ function layoutMaptext(html, boxW) {
 			y += lh;
 		}
 	}
-	return { rows: out, w: Math.ceil(widest), h: y };
+	return { rows: out, w: Math.ceil(widest), h: y, valign };
 }
 
 function drawMaptext(a, vx, vy, rgba) {
@@ -976,7 +987,11 @@ function drawMaptext(a, vx, vy, rgba) {
 		g.textBaseline = 'top';
 		g.scale(s, s);
 		g.translate(1, 1);
-		for (const row of layoutMaptext(a.maptext, w).rows) {
+		// vertical-align: middle / bottom place the text block in the box (the lobby's player counter); top by default
+		const lay = layoutMaptext(a.maptext, w);
+		if (lay.valign === 'middle' || lay.valign === 'center') g.translate(0, Math.max(0, Math.round((h - lay.h) / 2)));
+		else if (lay.valign === 'bottom') g.translate(0, Math.max(0, h - lay.h));
+		for (const row of lay.rows) {
 			let x = row.x;
 			for (const p of row.items) {
 				g.font = maptextFont(p.st);
@@ -1097,7 +1112,9 @@ function drawLighting(lights, at, t) {
 	const glows = [];
 	for (const d of lights) {
 		if (d.plane !== planes.lighting) { glows.push(d); continue; }
-		const [vx, vy] = at(d);
+		// whole pixels: while the view slides by a fraction of a pixel, smoothed tile edges would leave a grid of
+		// seams in the dark; all tiles share that fraction, so rounded they still meet edge to edge
+		const [fx, fy] = at(d), vx = Math.round(fx), vy = Math.round(fy);
 		const a = d.a;
 		const dx = vx * s, dy = h - (vy + TILE) * s;
 		if (a.icon_state === 'dark_lighting_object') { lightCtx.fillStyle = '#000'; lightCtx.fillRect(dx, dy, TILE * s, TILE * s); continue; }

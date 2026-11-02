@@ -59,9 +59,12 @@ function saveDmi(ic) {
 
 // per-pixel helpers on one frame
 function eachFrame(ic, f) { for (const s of ic.states) s.px = s.px.map(p => f(p, ic.w, ic.h)); }
-function blendPixel(d, i, r, g, b, a, mode) {
-	if (mode === 0) { d[i] = Math.min(255, d[i] + r); d[i + 1] = Math.min(255, d[i + 1] + g); d[i + 2] = Math.min(255, d[i + 2] + b); d[i + 3] = Math.min(255, d[i + 3] + a); }
-	else if (mode === 1) { d[i] = Math.max(0, d[i] - r); d[i + 1] = Math.max(0, d[i + 1] - g); d[i + 2] = Math.max(0, d[i + 2] - b); d[i + 3] = Math.max(0, d[i + 3] - a); }
+// add / subtract change the colour only: the icon keeps its own transparency (with an icon on top, the less
+// opaque of the two). Adding to alpha too turned every transparent pixel solid: SS13 tints body parts with
+// Blend(skin colour, ICON_ADD), and mobs came out as squares.
+function blendPixel(d, i, r, g, b, a, mode, icon = false) {
+	if (mode === 0) { d[i] = Math.min(255, d[i] + r); d[i + 1] = Math.min(255, d[i + 1] + g); d[i + 2] = Math.min(255, d[i + 2] + b); if (icon) d[i + 3] = Math.min(d[i + 3], a); }
+	else if (mode === 1) { d[i] = Math.max(0, d[i] - r); d[i + 1] = Math.max(0, d[i + 1] - g); d[i + 2] = Math.max(0, d[i + 2] - b); if (icon) d[i + 3] = Math.min(d[i + 3], a); }
 	else if (mode === 4) { d[i] = d[i] * r / 255; d[i + 1] = d[i + 1] * g / 255; d[i + 2] = d[i + 2] * b / 255; d[i + 3] = d[i + 3] * a / 255; }
 	else { // overlay: src over dst
 		const sa = a / 255, da = d[i + 3] / 255, oa = sa + da * (1 - sa);
@@ -88,7 +91,7 @@ function blendIcon(ic, src, mode, ox = 1, oy = 1) {
 			const sx = x - (ox - 1), syb = (ic.h - 1 - y) - (oy - 1), sy = src.h - 1 - syb;
 			if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) { if (mode === 4) d[(y * ic.w + x) * 4 + 3] = 0; continue; }
 			const j = (sy * src.w + sx) * 4;
-			blendPixel(d, (y * ic.w + x) * 4, q[j], q[j + 1], q[j + 2], q[j + 3], mode);
+			blendPixel(d, (y * ic.w + x) * 4, q[j], q[j + 1], q[j + 2], q[j + 3], mode, true);
 		}
 		return d;
 	});

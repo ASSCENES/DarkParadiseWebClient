@@ -658,8 +658,10 @@ function moveWindow(w, x, y) {
 	if (!w.box) return;
 	const o = pageOrigin(), fr = w.frame.getBoundingClientRect(), br = w.box.getBoundingClientRect();
 	const left = x - o.x - (fr.left - br.left), top = y - o.y - (fr.top - br.top);
-	// keep the whole window on the page (its own title bar must stay reachable)
-	const bw = w.box.offsetWidth || 0, bh = w.box.offsetHeight || 0;
+	// keep the whole window on the page (its own title bar must stay reachable); a hidden window has no layout
+	// size, so its set size counts
+	const bw = w.box.offsetWidth || parseInt(w.box.style.width) || 0, bh = w.box.offsetHeight || parseInt(w.box.style.height) || 0;
+	if (w.name === 'tgui_say' && isShown(w)) w.placed = true; // the player dragged the say box: it stays there
 	Object.assign(w.box.style, {
 		left: Math.max(0, Math.min(left, innerWidth - bw)) + 'px',
 		top: Math.max(0, Math.min(top, innerHeight - bh)) + 'px',
@@ -681,7 +683,25 @@ function notice(text) {
 }
 
 const isShown = w => livePopup(w) || (w.box || w.frame).style.display !== 'none';
+// The say box (tgui-say, key T): over the map, low and centred, until the player drags it elsewhere; typing goes
+// straight into it. DreamSeeker places it from the skin, in screen pixels of a desktop window.
+function openSayBox(w) {
+	if (!w.placed) {
+		const m = document.getElementById('mapwrap').getBoundingClientRect(), bw = parseInt(w.box.style.width) || 270, bh = parseInt(w.box.style.height) || 30;
+		Object.assign(w.box.style, { left: Math.round(m.left + (m.width - bw) / 2) + 'px', top: Math.round(m.bottom - bh - 72) + 'px' });
+	}
+	const focusInput = () => {
+		try {
+			w.frame.focus();
+			const input = w.frame.contentDocument.querySelector('textarea, input');
+			if (input) { input.focus(); return true; }
+		} catch (_) {}
+		return false;
+	};
+	if (!focusInput()) setTimeout(focusInput, 50);
+}
 function showWindow(w, on) {
+	if (on && w.name === 'tgui_say' && w.box) { w.box.style.display = 'flex'; openSayBox(w); return; }
 	if (w.own && w.box) {
 		if (on) {
 			if (!livePopup(w) && popupsOn) { const pop = openPopup(w); if (pop) return void hostIn(w, pop); }
@@ -825,6 +845,8 @@ function applyWinset(control, params) {
 	for (const [ctl, p] of byCtl) {
 		// the map control ("mapwindow.map", ":map"): right-click=true hands right clicks to the server
 		if (/(^|[.:])map$/.test(ctl) && 'right-click' in p) state.mapRightClick = p['right-click'] === 'true';
+		// focus back to the map (the say box does this as it closes): keys are the game's again
+		if (/(^|[.:])map$/.test(ctl) && p.focus === 'true') { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); window.focus(); }
 		if (ctl === 'input') { // the command line; classic (non-hotkey) mode puts typed letters there
 			if ('text' in p) cmdInput.value = p.text;
 			if (p.focus === 'true') cmdInput.focus();
@@ -832,9 +854,10 @@ function applyWinset(control, params) {
 		}
 		const w = controlWindow(ctl);
 		if (!w) continue;
+		// the size first: a window shown by the same winset is placed with it
+		if (w.box && p.size) { const [x, y] = p.size.split('x').map(Number); if (x && y) sizeWindow(w, x, y); }
 		if ('is-visible' in p && (p['is-visible'] === 'true') !== isShown(w)) showWindow(w, p['is-visible'] === 'true');
 		if (p.focus === 'true' && w.box) { if (!isShown(w)) showWindow(w, true); if (livePopup(w)) w.popup.focus(); w.frame.focus(); }
-		if (w.box && p.size) { const [x, y] = p.size.split('x').map(Number); if (x && y) sizeWindow(w, x, y); }
 		// pos is in screen pixels (pages compute it from window.screenLeft/Top, which they are told: framePos)
 		if (w.box && p.pos) {
 			const [x, y] = p.pos.split(/[,x]/).map(Number);
