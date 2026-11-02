@@ -164,6 +164,22 @@ function fetchResource(id, ms = 20000) {
 }
 
 // ---------- http ----------
+const FILE_TYPES = { '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.html': 'text/html', '.ttf': 'font/ttf', '.woff2': 'font/woff2', '.woff': 'font/woff', '.svg': 'image/svg+xml', '.json': 'application/json' };
+// Names world resources go by in browser windows (browse_rsc, tgui's asset aliases): id -> names, for /c/
+const assetNames = new Map();
+function addAssetName(id, name) {
+	let s = assetNames.get(id);
+	if (!s) assetNames.set(id, s = new Set());
+	s.add(name);
+}
+function assetIdByName(name) {
+	for (const [id, names] of assetNames) if (names.has(name)) return id;
+	for (const s of sessions.values()) {
+		const id = s.assets.get(name) ?? (s.aliases.has(name) ? s.assets.get(s.aliases.get(name)) : undefined);
+		if (id !== undefined) { addAssetName(id, name); return id; }
+	}
+	return undefined;
+}
 // A body, gzipped when the browser takes it and it is worth it (text, fonts); packed copies are kept by key
 // (resource id) or by buffer, the last 64
 const gzipped = new Map();
@@ -225,6 +241,24 @@ const server = http.createServer(async (req, res) => {
 		res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=86400' });
 		return res.end(png);
 	}
+	// A world resource by its id (its CRC): the same address in every session, so the browser keeps it for good.
+	// Files of a session (/a/<sid>/name) that are world resources are sent on here. A relative reference inside
+	// such a file (a stylesheet's fonts) arrives as /c/<that file's id>/<other name>: found by name again.
+	const cm = url.pathname.match(/^\/c\/([0-9a-f]{8})\/(.+)$/);
+	if (cm) {
+		const id = parseInt(cm[1], 16) >>> 0, name = decodeURIComponent(cm[2]);
+		if (!(assetNames.get(id) || new Set()).has(name)) {
+			const other = assetIdByName(name);
+			if (other === undefined) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); }
+			res.writeHead(302, { Location: '/c/' + hex8(other) + '/' + encodeURIComponent(name), 'Cache-Control': 'no-store' });
+			return res.end();
+		}
+		const e = await fetchResource(id);
+		if (!e) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); }
+		const ext = path.extname(name).toLowerCase();
+		return sendBody(req, res, { 'Content-Type': (FILE_TYPES[ext] || 'application/octet-stream') + (/^\.(js|css|html)$/.test(ext) ? '; charset=utf-8' : ''),
+			'Cache-Control': 'max-age=31536000, immutable' }, e.data, /^\.(js|css|html|json|svg|ttf)$/.test(ext), 'res:' + id);
+	}
 	const am = url.pathname.match(/^\/a\/(\d+)\/(.+)$/);
 	if (am) {
 		const sess = sessions.get(+am[1]);
@@ -241,14 +275,19 @@ const server = http.createServer(async (req, res) => {
 		// held a browser connection for minutes and stalled every other window's scripts behind it.
 		const known = () => sess && (sess.files.has(want) || sess.assets.has(want) || sess.aliases.has(want));
 		for (let i = 0; !known() && sess && i < 10; i++) await new Promise(r => setTimeout(r, 200));
+		// a world resource: on to its address by id (/c/), which the browser keeps across sessions
+		const resolved = sess && !sess.files.has(want) && !sess.assets.has(want) && sess.aliases.has(want) ? sess.aliases.get(want) : want;
+		const rid = sess && !sess.files.has(resolved) ? sess.assets.get(resolved) : undefined;
+		if (rid !== undefined) {
+			addAssetName(rid, want);
+			res.writeHead(302, { Location: '/c/' + hex8(rid) + '/' + encodeURIComponent(want), 'Cache-Control': 'no-store' });
+			return res.end();
+		}
 		const e = await lookup();
 		if (!e) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); } // may appear in .dyn.rsc soon
 		const ext = path.extname(am[2]).toLowerCase();
-		const types = { '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.html': 'text/html', '.ttf': 'font/ttf', '.woff2': 'font/woff2', '.woff': 'font/woff', '.svg': 'image/svg+xml', '.json': 'application/json' };
-		// Every tgui window loads tgui.bundle.js (2.5 MB), its CSS and fonts: kept by the browser (the session's
-		// address in the path keeps another session's files apart) and sent gzipped, once
-		const headers = { 'Content-Type': (types[ext] || 'application/octet-stream') + (/^\.(js|css|html)$/.test(ext) ? '; charset=utf-8' : ''),
-			'Cache-Control': /^asset\.[0-9a-f]{32}\./.test(want) ? 'max-age=31536000, immutable' : 'max-age=3600' };
+		// files the server pushed to this session (browse(file=), output files): kept for the session, gzipped
+		const headers = { 'Content-Type': (FILE_TYPES[ext] || 'application/octet-stream') + (/^\.(js|css|html)$/.test(ext) ? '; charset=utf-8' : ''), 'Cache-Control': 'max-age=3600' };
 		return sendBody(req, res, headers, e.data, /^\.(js|css|html|json|svg|ttf)$/.test(ext), e.id !== undefined ? 'res:' + e.id : e.data);
 	}
 	// sounds (and any other resource) by .rsc id; the type is sniffed from the file's first bytes
@@ -287,16 +326,21 @@ const server = http.createServer(async (req, res) => {
 	if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
 		// Chrome's preload scanner may fetch a window's script before applying its <base>: find it in a session
 		const bare = decodeURIComponent(url.pathname.slice(1));
-		if (/^[^/]+$/.test(bare)) for (const s of sessions.values()) {
-			const id = s.assets.get(bare), e = s.files.get(bare) ? { data: s.files.get(bare) } : id !== undefined && findResource(id);
-			if (!e) continue;
-			res.writeHead(200, { 'Content-Type': MIME[path.extname(bare)] || 'application/octet-stream' });
-			return res.end(e.data);
+		if (/^[^/]+$/.test(bare)) {
+			const id = assetIdByName(bare);
+			if (id !== undefined) { res.writeHead(302, { Location: '/c/' + hex8(id) + '/' + encodeURIComponent(bare), 'Cache-Control': 'no-store' }); return res.end(); }
+			for (const s of sessions.values()) {
+				if (!s.files.get(bare)) continue;
+				return sendBody(req, res, { 'Content-Type': MIME[path.extname(bare)] || 'application/octet-stream', 'Cache-Control': 'no-cache' }, s.files.get(bare), true);
+			}
 		}
 		res.writeHead(404); return res.end('not found');
 	}
-	res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
-	fs.createReadStream(file).pipe(res);
+	// the page itself: kept by the browser but checked each time (ETag), so a new version is picked up at once
+	const st = fs.statSync(file), etag = '"' + st.size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
+	if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' }); return res.end(); }
+	return sendBody(req, res, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag },
+		fs.readFileSync(file), /\.(js|css|html)$/.test(file), 'static:' + file + etag);
 });
 
 // ---------- sessions ----------
@@ -850,7 +894,7 @@ wss.on('connection', (ws, req) => {
 			case 254: { // browse_rsc: u32 resource index, file name
 				const idx = d.readUInt32LE(0), name = d.toString('utf8', 4, d.indexOf(0, 4));
 				const r = map.resources[idx];
-				if (r) sess.assets.set(name, r.id);
+				if (r) { sess.assets.set(name, r.id); addAssetName(r.id, name); }
 				break;
 			}
 			case 132: { // browse(): html \0 params
@@ -1152,7 +1196,8 @@ wss.on('connection', (ws, req) => {
 				if (ws.readyState !== 1) return;
 				const meta = e ? dmiMeta(e) : null;
 				if (!e || !meta || meta.error) return void send({ t: 'iconFail', id: m.id });
-				const head = Buffer.from(JSON.stringify({ id: m.id, meta }));
+				// built: made here from a run-time recipe (DDMI), which depends on the server: not for the page's cache
+				const head = Buffer.from(JSON.stringify({ id: m.id, meta, built: builtIcons.has(id) }));
 				const len = Buffer.alloc(4); len.writeUInt32LE(head.length, 0);
 				ws.send(Buffer.concat([len, head, e.data]));
 			});

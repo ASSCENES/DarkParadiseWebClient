@@ -1073,17 +1073,29 @@ const iconFails = new Map(); // rsc id -> failed loads in a row
 // Icons come over the page socket (ws "icon" -> one binary frame: u32 head length, JSON { id, meta }, PNG):
 // any number at once, where HTTP would queue them behind the browser's few connections to the site. Before the
 // socket is open they come over HTTP as before.
+// Icons are kept in the browser's Cache Storage under their id (the file's CRC, so they never change) and come
+// from there on the next visit; only those missing are asked for. Icons built from run-time recipes are not kept.
+// (Cache Storage exists on https and localhost only; elsewhere every visit asks again.)
+const iconStore = (() => { try { return window.caches ? caches.open('seeker-icons-v1') : null; } catch (_) { return null; } })();
 function getIcon(rsc) {
 	let ic = icons.get(rsc);
 	if (ic) return ic.ready ? ic : null;
 	ic = { ready: false };
 	icons.set(rsc, ic);
-	if (ws.readyState === 1) { ws.send(JSON.stringify({ t: 'icon', id: rsc })); return null; }
+	if (iconStore) {
+		iconStore.then(c => c.match('/icon-store/' + rsc)).then(r => (r ? r.arrayBuffer() : null))
+			.then(buf => (buf ? iconArrived(buf, true) : askIcon(rsc)), () => askIcon(rsc));
+		return null;
+	}
+	askIcon(rsc);
+	return null;
+}
+function askIcon(rsc) {
+	if (ws.readyState === 1) { ws.send(JSON.stringify({ t: 'icon', id: rsc })); return; }
 	Promise.all([
 		fetch('/icon/' + rsc + '.json').then(r => r.ok ? r.json() : null),
 		new Promise(res => { const img = new Image(); img.onload = () => res(img); img.onerror = () => res(null); img.src = '/icon/' + rsc + '.png'; }),
 	]).then(([meta, img]) => (meta && img && !meta.error ? iconReady(rsc, meta, img) : iconFailed(rsc)));
-	return null;
 }
 function iconReady(rsc, meta, img) {
 	const ic = icons.get(rsc);
@@ -1098,9 +1110,10 @@ function iconFailed(rsc) {
 	iconFails.set(rsc, n);
 	setTimeout(() => icons.delete(rsc), n <= 10 ? 2000 : 30000);
 }
-function iconArrived(buf) {
+function iconArrived(buf, fromStore = false) {
 	const len = new DataView(buf).getUint32(0, true);
 	const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, len)));
+	if (!fromStore && iconStore && !head.built) iconStore.then(c => c.put('/icon-store/' + head.id, new Response(buf.slice(0)))).catch(() => {});
 	const img = new Image();
 	img.onload = () => iconReady(head.id, head.meta, img);
 	img.onerror = () => iconFailed(head.id);
