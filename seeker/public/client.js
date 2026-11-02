@@ -577,7 +577,9 @@ function openPopup(w) {
 		return null;
 	}
 	p.document.open();
-	p.document.write('<!doctype html><meta charset="utf-8"><title></title><style>html,body{margin:0;height:100%;overflow:hidden;background:#000}iframe{display:block;border:0;width:100%;height:100%}</style>');
+	// the frame is white like a browser page (and like windows on the page): pages that set no background of their
+	// own (View Variables) print black text and were unreadable on the popup's black
+	p.document.write('<!doctype html><meta charset="utf-8"><title></title><style>html,body{margin:0;height:100%;overflow:hidden;background:#000}iframe{display:block;border:0;width:100%;height:100%;background:#fff}</style>');
 	p.document.close();
 	p.document.title = w.box.querySelector('span').textContent;
 	const frame = p.document.createElement('iframe');
