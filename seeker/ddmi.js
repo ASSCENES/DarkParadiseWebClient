@@ -103,10 +103,25 @@ function blendPixel(d, i, r, g, b, a, mode, icon = false) {
 function blendColor(ic, c, mode) {
 	eachFrame(ic, p => { const d = Buffer.from(p); for (let i = 0; i < d.length; i += 4) blendPixel(d, i, c[0], c[1], c[2], c[3], mode); return d; });
 }
-// Blend(icon): frames are matched by state name, dir and frame where the source has them, else its first
+// Blend(icon): frames are matched by state name, dir and frame where the source has them, else its first. A
+// source with more directions or frames widens the result to them, as BYOND does: SS13 builds underwear on a
+// one-direction "nude" state and blends the four-direction garment in; kept at one direction, it always faced
+// south and showed past the clothes of a mob turned sideways.
 function blendIcon(ic, src, mode, ox = 1, oy = 1) {
+	const source = s => src.states.find(q => q.name === s.name) || src.states[0];
+	for (const s of ic.states) {
+		const t = source(s);
+		if (!t || (t.dirs <= s.dirs && t.frames <= s.frames)) continue;
+		const dirs = Math.max(s.dirs, t.dirs), frames = Math.max(s.frames, t.frames), old = s.px;
+		s.px = Array.from({ length: dirs * frames }, (_, n) => {
+			const d = n % dirs, f = Math.floor(n / dirs);
+			return old[Math.min(f, s.frames - 1) * s.dirs + (d < s.dirs ? d : 0)];
+		});
+		if (frames > s.frames) s.delay = t.delay;
+		s.dirs = dirs; s.frames = frames;
+	}
 	const pick = (s, n) => {
-		const t = src.states.find(q => q.name === s.name) || src.states[0];
+		const t = source(s);
 		if (!t) return null;
 		const dir = n % s.dirs, frame = Math.floor(n / s.dirs);
 		return t.px[(Math.min(frame, t.frames - 1)) * t.dirs + (dir < t.dirs ? dir : 0)];
