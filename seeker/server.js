@@ -338,7 +338,7 @@ wss.on('connection', (ws, req) => {
 	};
 	for (const other of sessions.values()) if (other.kick && other.server === target) other.kick();
 	sess.dump = answer => { sess.dumped = answer; send({ t: 'dump' }); };
-	const verbs = new Map(); // lower-case verb name -> id
+	const verbs = new Map(); // lower-case verb name -> [ids] (several types may have a verb of the same name)
 	const verbDefs = new Map(); // verb id -> { id, name, category, srcSetting, flags, args: [{ types, source }] }
 	const me = { ref: null, pos: null };
 	const eye = { x: null, y: null }; // client.eye position from message 7
@@ -485,15 +485,20 @@ wss.on('connection', (ws, req) => {
 	}
 
 	function callVerb(name, args = []) {
-		const id = verbs.get(name.toLowerCase());
-		if (id === undefined) return false;
+		const ids = verbs.get(name.toLowerCase());
+		if (!ids || !ids.length) return false;
+		// src: our mob (type 2) for verbs its appearance lists, otherwise the client (type 8). Of several verbs of
+		// that name (Paradise's admin verbs share names with others), the one our mob or client really has.
+		const mobApp = me.app !== undefined && map.appearances.get(me.app);
+		const clientApp = me.clientApp !== undefined && map.appearances.get(me.clientApp);
+		const onMob = id => !!(mobApp && mobApp.verbs && mobApp.verbs.includes(id));
+		const onClient = id => !!(clientApp && clientApp.verbs && clientApp.verbs.includes(id));
+		const id = ids.find(onMob) ?? ids.find(onClient) ?? ids[ids.length - 1];
 		const parts = [Buffer.from([2, 0])];
 		const idb = Buffer.alloc(map.wideVerbs ? 4 : 2);
 		map.wideVerbs ? idb.writeUInt32LE(id) : idb.writeUInt16LE(id);
-		// src: our mob (type 2) for verbs its appearance lists, otherwise the client (type 8)
-		const mobApp = me.app !== undefined && map.appearances.get(me.app);
 		const src = Buffer.alloc(5);
-		if (mobApp && mobApp.verbs && mobApp.verbs.includes(id)) { src[0] = 2; src.writeUInt32LE(me.ref, 1); }
+		if (onMob(id)) { src[0] = 2; src.writeUInt32LE(me.ref, 1); }
 		else { src[0] = 8; src.writeUInt32LE(1, 1); }
 		parts.push(idb, src, Buffer.from([args.length]));
 		if (process.env.SEEKER_DEBUG) console.log('[' + sid + '] verb', name, id, 'src', src.toString('hex'), 'meApp', me.app, mobApp ? mobApp.verbs.length + ' mob verbs' : 'no mob app');
@@ -609,7 +614,9 @@ wss.on('connection', (ws, req) => {
 				// [flags 0x80: u32], u8 argc, argc × {u32 type mask, u16 source}
 				const id = map.wideVerbs ? d.readUInt32LE(0) : d.readUInt16LE(0);
 				const [name, , category, o] = cstrings(d, map.wideVerbs ? 4 : 2, 3);
-				verbs.set(name.toLowerCase(), id);
+				const same = verbs.get(name.toLowerCase()) || [];
+				if (!same.includes(id)) same.push(id);
+				verbs.set(name.toLowerCase(), same);
 				const def = { id, name, category, args: [] };
 				try {
 					def.srcSetting = d.readUInt16LE(o); def.flags = d[o + 2];

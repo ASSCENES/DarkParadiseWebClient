@@ -225,6 +225,11 @@ world
 		usr.client.eye = usr.client.eye == src ? O : src
 		usr.client.perspective = EYE_PERSPECTIVE
 
+	// a client verb, and one added at run time (as Paradise's admin verbs are: /client/proc + verbs +=)
+	verb/test_addverb()
+		usr.client.verbs += /client/proc/test_dyn_client_verb
+		usr << "dynamic client verb added"
+
 	// samples of runtime icons for working out the DDMI recipe format; their names say what was done
 	verb/test_ddmi()
 		var/list/L = list()
@@ -654,3 +659,12 @@ var/obj/flapvis/shared_flapvis
 	var/t = TopicData
 	spawn(15)
 		src << "TOPIC=\[[t]\]"
+
+/client/verb/test_client_verb()
+	set category = "Test"
+	usr << "CLIENT VERB OK"
+
+/client/proc/test_dyn_client_verb()
+	set name = "Test Dyn Client Verb"
+	set category = "Test"
+	usr << "DYN CLIENT VERB OK"
