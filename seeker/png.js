@@ -21,21 +21,30 @@ function decodePng(buf) {
 	if (!channels || (depth !== 8 && !(depth < 8 && (type === 0 || type === 3)))) throw new Error('unsupported PNG ' + type + '/' + depth);
 	const raw = zlib.inflateSync(Buffer.concat(idat));
 	const bpp = Math.max(1, (channels * depth) >> 3), stride = (w * channels * depth + 7) >> 3;
-	const lines = Buffer.alloc(stride * h);
-	let prev = Buffer.alloc(stride);
+	// unfiltered rows; one tight loop per filter type (the gateway decodes big DMI sheets while every player waits)
+	const lines = new Uint8Array(stride * h), zero = new Uint8Array(stride);
 	for (let y = 0, p = 0; y < h; y++) {
-		const filter = raw[p++], line = lines.subarray(y * stride, (y + 1) * stride);
-		for (let x = 0; x < stride; x++) {
-			const v = raw[p++], a = x >= bpp ? line[x - bpp] : 0, b = prev[x], c = x >= bpp ? prev[x - bpp] : 0;
-			let pred = 0;
-			if (filter === 1) pred = a;
-			else if (filter === 2) pred = b;
-			else if (filter === 3) pred = (a + b) >> 1;
-			else if (filter === 4) { const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c); pred = pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
-			line[x] = (v + pred) & 255;
+		const filter = raw[p++], o = y * stride, po = y ? o - stride : -1, prev = y ? lines : zero, pb = y ? po : 0;
+		if (filter === 0) lines.set(raw.subarray(p, p + stride), o);
+		else if (filter === 1) {
+			for (let x = 0; x < bpp; x++) lines[o + x] = raw[p + x];
+			for (let x = bpp; x < stride; x++) lines[o + x] = (raw[p + x] + lines[o + x - bpp]) & 255;
+		} else if (filter === 2) {
+			for (let x = 0; x < stride; x++) lines[o + x] = (raw[p + x] + prev[pb + x]) & 255;
+		} else if (filter === 3) {
+			for (let x = 0; x < bpp; x++) lines[o + x] = (raw[p + x] + (prev[pb + x] >> 1)) & 255;
+			for (let x = bpp; x < stride; x++) lines[o + x] = (raw[p + x] + ((lines[o + x - bpp] + prev[pb + x]) >> 1)) & 255;
+		} else {
+			for (let x = 0; x < stride; x++) {
+				const a = x >= bpp ? lines[o + x - bpp] : 0, b = prev[pb + x], c = x >= bpp ? prev[pb + x - bpp] : 0;
+				const pa = Math.abs(b - c), pbb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c);
+				lines[o + x] = (raw[p + x] + (pa <= pbb && pa <= pc ? a : pbb <= pc ? b : c)) & 255;
+			}
 		}
-		prev = line;
+		p += stride;
 	}
+	// RGBA rows are the output as they are
+	if (type === 6) return { width: w, height: h, data: Buffer.from(lines.buffer, lines.byteOffset, lines.length) };
 	const out = Buffer.alloc(w * h * 4);
 	const sample = (line, x) => {
 		if (depth === 8) return line[x];
@@ -46,8 +55,7 @@ function decodePng(buf) {
 		const line = lines.subarray(y * stride, (y + 1) * stride);
 		for (let x = 0; x < w; x++) {
 			const q = (y * w + x) * 4;
-			if (type === 6) line.copy(out, q, x * 4, x * 4 + 4);
-			else if (type === 2) { out[q] = line[x * 3]; out[q + 1] = line[x * 3 + 1]; out[q + 2] = line[x * 3 + 2]; out[q + 3] = 255; }
+			if (type === 2) { out[q] = line[x * 3]; out[q + 1] = line[x * 3 + 1]; out[q + 2] = line[x * 3 + 2]; out[q + 3] = 255; }
 			else if (type === 4) { out[q] = out[q + 1] = out[q + 2] = line[x * 2]; out[q + 3] = line[x * 2 + 1]; }
 			else if (type === 0) { const g = sample(line, x) * 255 / ((1 << depth) - 1); out[q] = out[q + 1] = out[q + 2] = g; out[q + 3] = 255; }
 			else { const i = sample(line, x); out[q] = palette[i * 3]; out[q + 1] = palette[i * 3 + 1]; out[q + 2] = palette[i * 3 + 2]; out[q + 3] = trns && i < trns.length ? trns[i] : 255; }

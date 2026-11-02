@@ -21,19 +21,47 @@ const { readDmiMeta } = require('./dmi');
 
 const DIRS = [2, 1, 4, 8, 6, 10, 5, 9]; // DMI order: S N E W SE SW NE NW
 
-// A DMI file -> { w, h, states: [{ name, dirs, frames, delay, loop, rewind, movement, px: [Buffer] }] }
-function loadDmi(png) {
-	const meta = readDmiMeta(png), img = decodePng(png), w = meta.width, h = meta.height;
+// Decoded DMI sheets by key (a resource id), the most recently used up to ~256 MB of pixels. Decoding a big
+// sheet takes tens of milliseconds and blocks the whole gateway (every player waits): SS13 builds many run-time
+// icons from the same few body sheets, and tgui asks for frames of the same icons again and again.
+const sheets = new Map();
+let sheetBytes = 0;
+function decodeSheet(key, png) {
+	let s = key != null && sheets.get(key);
+	if (s) { sheets.delete(key); sheets.set(key, s); return s; }
+	s = { meta: readDmiMeta(png), img: decodePng(png), dmi: null };
+	if (key == null) return s;
+	sheets.set(key, s);
+	sheetBytes += s.img.data.length;
+	for (const [k, old] of sheets) {
+		if (sheetBytes <= 256e6 || k === key) break;
+		sheets.delete(k); sheetBytes -= old.img.data.length;
+	}
+	return s;
+}
+
+// A DMI file -> { w, h, states: [{ name, dirs, frames, delay, loop, rewind, movement, px: [Buffer] }] }; the
+// frames of a state are cut from the sheet when first used (px is a getter), most recipes use one state
+function loadDmi(png, key) {
+	const sheet = decodeSheet(key, png);
+	if (sheet.dmi) return sheet.dmi;
+	const { meta, img } = sheet, w = meta.width, h = meta.height, cols = meta.cols || 1;
 	const states = meta.states.map(s => {
-		const px = [];
-		for (let n = 0; n < s.dirs * s.frames; n++) {
-			const k = s.offset + n, sx = (k % meta.cols) * w, sy = Math.floor(k / meta.cols) * h, out = Buffer.alloc(w * h * 4);
-			for (let y = 0; y < h; y++) if (sy + y < img.height) img.data.copy(out, y * w * 4, ((sy + y) * img.width + sx) * 4, ((sy + y) * img.width + sx + w) * 4);
-			px.push(out);
-		}
-		return { name: s.name, dirs: s.dirs, frames: s.frames, delay: s.delay || [], loop: s.loop, rewind: s.rewind, movement: s.movement, px };
+		const st = { name: s.name, dirs: s.dirs, frames: s.frames, delay: s.delay || [], loop: s.loop, rewind: s.rewind, movement: s.movement };
+		let px = null;
+		Object.defineProperty(st, 'px', { enumerable: true, get() {
+			if (px) return px;
+			px = [];
+			for (let n = 0; n < s.dirs * s.frames; n++) {
+				const k = s.offset + n, sx = (k % cols) * w, sy = Math.floor(k / cols) * h, out = Buffer.alloc(w * h * 4);
+				for (let y = 0; y < h; y++) if (sy + y < img.height) img.data.copy(out, y * w * 4, ((sy + y) * img.width + sx) * 4, ((sy + y) * img.width + sx + w) * 4);
+				px.push(out);
+			}
+			return px;
+		} });
+		return st;
 	});
-	return { w, h, states };
+	return (sheet.dmi = { w, h, states });
 }
 
 function saveDmi(ic) {
@@ -126,14 +154,18 @@ async function buildDdmi(buf, loadResource) {
 			const dir = u8(), frame = u8(), moving = u8();
 			let state = null, file = null;
 			while (stack.length) { const v = stack.pop(); if (v && v.str !== undefined && state === null) state = v.str; else if (v && (v.file !== undefined || v.icon)) { file = v; break; } }
-			let ic = file && file.icon ? file.icon : file ? loadDmi(await loadResource(file.file)) : null;
-			if (!ic) throw new Error('icon() without a file');
-			ic = { w: ic.w, h: ic.h, states: ic.states.map(s => ({ ...s, px: s.px.slice() })) };
+			let src = null;
+			if (file && file.icon) src = file.icon;
+			else if (file) { const r = await loadResource(file.file); src = Buffer.isBuffer(r) ? loadDmi(r) : loadDmi(r.data, r.id); }
+			if (!src) throw new Error('icon() without a file');
+			// the chosen state only is copied (its frames are cut from the sheet now), or every state for a whole file
+			let chosen = src.states;
 			if (state !== null) {
-				const want = ic.states.filter(s => s.name === state);
+				const want = src.states.filter(s => s.name === state);
 				const one = want.find(s => moving === 0xff ? !s.movement : !!s.movement === !!moving) || want[0];
-				ic.states = one ? [{ ...one, name: '' }] : [];
+				chosen = one ? [{ ...one, name: '' }] : [];
 			}
+			const ic = { w: src.w, h: src.h, states: chosen.map(s => ({ ...s, px: s.px.slice() })) };
 			if (dir !== 0xff) for (const s of ic.states) { s.px = Array.from({ length: s.frames }, (_, f) => s.px[f * s.dirs + (dir < s.dirs ? dir : 0)]); s.dirs = 1; }
 			if (frame !== 0xff) for (const s of ic.states) { const f = Math.min(frame, s.frames - 1); s.px = s.px.slice(f * s.dirs, (f + 1) * s.dirs); s.frames = 1; s.delay = []; }
 			stack.push({ icon: ic });
@@ -203,4 +235,4 @@ async function buildDdmi(buf, loadResource) {
 	return saveDmi(top);
 }
 
-module.exports = { buildDdmi };
+module.exports = { buildDdmi, decodeSheet };

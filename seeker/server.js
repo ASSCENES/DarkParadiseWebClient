@@ -14,7 +14,7 @@ const zlib = require('zlib');
 const { Rsc, parseRsc } = require('./proto/rsc');
 const { crc: resourceCrc, decipher } = require('./proto/rsccrypt');
 const { readDmiMeta } = require('./dmi');
-const { buildDdmi } = require('./ddmi');
+const { buildDdmi, decodeSheet } = require('./ddmi');
 const { decodePng, encodePng } = require('./png');
 const { fontFamily, hasGlyph } = require('./font');
 
@@ -86,8 +86,9 @@ function iconFrame(e, q) {
 	if (!st) return null;
 	const dir = DIR_INDEX[+q.get('dir') || 2] || 0, frame = Math.max(0, Math.min(st.frames - 1, (+q.get('frame') || 1) - 1));
 	const n = st.offset + frame * st.dirs + (dir < st.dirs ? dir : 0);
+	// the decoded sheet is kept (tgui asks for frames of the same icons again and again)
 	let px;
-	try { px = decodePng(e.data); } catch (_) { return null; }
+	try { px = decodeSheet(e.id !== undefined ? 'res:' + e.id : null, e.data).img; } catch (_) { return null; }
 	const { width: w, height: h, cols } = meta, sx = (n % cols) * w, sy = Math.floor(n / cols) * h;
 	if (sx + w > px.width || sy + h > px.height) return null;
 	const out = Buffer.alloc(w * h * 4);
@@ -308,7 +309,7 @@ const server = http.createServer(async (req, res) => {
 		if (!e) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); } // may appear in .dyn.rsc soon
 		if (m[2] === 'rgba') { // straight (not premultiplied) pixels: u32 width, u32 height, then RGBA rows
 			let px;
-			try { px = decodePng(e.data); } catch (err) { res.writeHead(415); return res.end(String(err.message)); }
+			try { px = decodeSheet('res:' + id, e.data).img; } catch (err) { res.writeHead(415); return res.end(String(err.message)); }
 			const head = Buffer.alloc(8);
 			head.writeUInt32LE(px.width, 0); head.writeUInt32LE(px.height, 4);
 			res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'max-age=86400' });
@@ -466,7 +467,7 @@ wss.on('connection', (ws, req) => {
 		buildDdmi(data, async i => {
 			const r = map.resources[i], e = r && await fetchResource(r.id);
 			if (!e) throw new Error('resource #' + i + ' did not come');
-			return e.data;
+			return { id: 'res:' + r.id, data: e.data }; // keyed: its decoded sheet is kept (decodeSheet)
 		}).then(png => storeResource(id, 3, png, false), err => console.log('[' + sid + '] run-time icon ' + hex8(id) + ': ' + err.message));
 	};
 	// Entries of a "resources" fragment; enciphered ones (type | 0x80) are keyed by their real id, which their
