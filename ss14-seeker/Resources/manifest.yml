@@ -1,0 +1,3 @@
+modules: [Robust.Client.WebView] # the game is a web page in a CEF view
+assemblyPrefix: Content # Assembly prefix here.
+defaultWindowTitle: Dark Paradise (Seeker)

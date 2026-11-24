@@ -4,9 +4,10 @@
 //   "DDMI", u32 length of the rest, then a stack program:
 //   01 u32 i      push resource i of the world's list (message 14)       08     push null
 //   05 text \0    push a string                                           03 rgba push a colour
+//   04 f32        push a number                     (01 i, 08 with no 40 after: new /icon(file), all its states)
 //   40 dir frame moving   icon(file, state): pops state, null, file; ff = any
 //   42 mode       Blend(top, mode) into the icon below; 4d mode u16 x, u16 y: the same at x, y
-//                 (mode 0 add, 1 subtract, 4 multiply, 7 overlay; the rest taken as overlay)
+//                 (mode 0 add, 1 subtract, 2 or, 3 and, 4 multiply, 7 overlay, 8 underlay)
 //   41 dir frame f32 delay moving   Insert(icon, state): pops state, icon
 //   43 f32 r g b     SetIntensity (negative: unchanged)    44 d  Flip (d: DMI direction index)
 //   45 f32 angle     Turn                                  47 d u16 n u8 wrap  Shift
@@ -87,18 +88,34 @@ function saveDmi(ic) {
 
 // per-pixel helpers on one frame
 function eachFrame(ic, f) { for (const s of ic.states) s.px = s.px.map(p => f(p, ic.w, ic.h)); }
-// add / subtract change the colour only: the icon keeps its own transparency (with an icon on top, the less
-// opaque of the two). Adding to alpha too turned every transparent pixel solid: SS13 tints body parts with
-// Blend(skin colour, ICON_ADD), and mobs came out as squares.
-function blendPixel(d, i, r, g, b, a, mode, icon = false) {
-	if (mode === 0) { d[i] = Math.min(255, d[i] + r); d[i + 1] = Math.min(255, d[i + 1] + g); d[i + 2] = Math.min(255, d[i + 2] + b); if (icon) d[i + 3] = Math.min(d[i + 3], a); }
-	else if (mode === 1) { d[i] = Math.max(0, d[i] - r); d[i + 1] = Math.max(0, d[i + 1] - g); d[i + 2] = Math.max(0, d[i + 2] - b); if (icon) d[i + 3] = Math.min(d[i + 3], a); }
-	else if (mode === 4) { d[i] = d[i] * r / 255; d[i + 1] = d[i + 1] * g / 255; d[i + 2] = d[i + 2] * b / 255; d[i + 3] = d[i + 3] * a / 255; }
-	else { // overlay: src over dst
-		const sa = a / 255, da = d[i + 3] / 255, oa = sa + da * (1 - sa);
-		if (oa <= 0) { d[i] = d[i + 1] = d[i + 2] = d[i + 3] = 0; return; }
-		d[i] = (r * sa + d[i] * da * (1 - sa)) / oa; d[i + 1] = (g * sa + d[i + 1] * da * (1 - sa)) / oa; d[i + 2] = (b * sa + d[i + 2] * da * (1 - sa)) / oa; d[i + 3] = oa * 255;
+// one pixel drawn over another: [r, g, b, a] of the top and the bottom; BYOND mixes the colours by the top's
+// alpha alone and rounds each part
+function over(d, i, t, u) {
+	const top = !u[3] ? t : !t[3] ? u : null;
+	if (top) { for (let c = 0; c < 4; c++) d[i + c] = top[c]; return; }
+	for (let c = 0; c < 3; c++) d[i + c] = Math.round(t[c] * t[3] / 255) + Math.round(u[c] * (255 - t[3]) / 255);
+	d[i + 3] = Math.round(t[3] + u[3] * (1 - t[3] / 255));
+}
+// As BYOND blends (measured with GetPixel): add, subtract, and, multiply keep a pixel only where both have one,
+// with the alphas multiplied; or adds the colours and keeps either pixel; overlay and underlay draw one over the other
+function blendPixel(d, i, r, g, b, a, mode) {
+	if (mode === 7) return over(d, i, [r, g, b, a], [d[i], d[i + 1], d[i + 2], d[i + 3]]);
+	if (mode === 8) return over(d, i, [d[i], d[i + 1], d[i + 2], d[i + 3]], [r, g, b, a]);
+	const da = d[i + 3], s = [r, g, b];
+	if (mode === 2) {
+		if (!a) return;
+		if (!da) { d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = a; return; }
+		for (let c = 0; c < 3; c++) d[i + c] = Math.min(255, d[i + c] + s[c]);
+		d[i + 3] = Math.round(a + da * (1 - a / 255));
+		return;
 	}
+	const oa = Math.round(da * a / 255);
+	if (!oa) { d.fill(0, i, i + 4); return; }
+	for (let c = 0; c < 3; c++) {
+		const v = mode === 1 ? d[i + c] - s[c] : mode === 4 ? d[i + c] * s[c] / 255 : d[i + c] + s[c];
+		d[i + c] = Math.max(0, Math.min(255, Math.round(v)));
+	}
+	d[i + 3] = oa;
 }
 function blendColor(ic, c, mode) {
 	eachFrame(ic, p => { const d = Buffer.from(p); for (let i = 0; i < d.length; i += 4) blendPixel(d, i, c[0], c[1], c[2], c[3], mode); return d; });
@@ -132,12 +149,41 @@ function blendIcon(ic, src, mode, ox = 1, oy = 1) {
 		for (let y = 0; y < ic.h; y++) for (let x = 0; x < ic.w; x++) {
 			// x, y are 1-based from the bottom-left in BYOND
 			const sx = x - (ox - 1), syb = (ic.h - 1 - y) - (oy - 1), sy = src.h - 1 - syb;
-			if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) { if (mode === 4) d[(y * ic.w + x) * 4 + 3] = 0; continue; }
+			if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) { blendPixel(d, (y * ic.w + x) * 4, 0, 0, 0, 0, mode); continue; }
 			const j = (sy * src.w + sx) * 4;
 			blendPixel(d, (y * ic.w + x) * 4, q[j], q[j + 1], q[j + 2], q[j + 3], mode, true);
 		}
 		return d;
 	});
+}
+// Insert(icon, state, dir, frame): with no dir and frame the state is replaced; otherwise only that direction
+// and/or frame of the state is, the state growing to 4 (8 for a diagonal) directions and enough frames first
+function insertState(dst, s, name, dir, frame, delay, movement) {
+	let t = dst.states.find(q => q.name === name && !q.movement === !movement);
+	if (dir === 0xff && frame === 0xff) {
+		const fresh = { ...s, name, movement, delay: delay > 0 ? [delay] : s.delay, px: s.px.slice() };
+		dst.states = dst.states.filter(q => q !== t).concat([fresh]);
+		return;
+	}
+	if (!t) {
+		t = { name, dirs: 1, frames: 1, delay: [], loop: 0, rewind: 0, movement, px: [Buffer.alloc(dst.w * dst.h * 4)] };
+		dst.states.push(t);
+	}
+	const dirs = dir === 0xff ? Math.max(t.dirs, s.dirs) : Math.max(t.dirs, dir >= 4 ? 8 : 4);
+	const frames = frame === 0xff ? Math.max(t.frames, s.frames) : Math.max(t.frames, frame + 1);
+	const px = [];
+	for (let f = 0; f < frames; f++) for (let d = 0; d < dirs; d++) px.push(t.px[Math.min(f, t.frames - 1) * t.dirs + (d < t.dirs ? d : 0)]);
+	for (let f = 0; f < frames; f++) {
+		if (frame !== 0xff && f !== frame) continue;
+		const sf = frame === 0xff ? Math.min(f, s.frames - 1) : 0;
+		for (let d = 0; d < dirs; d++) {
+			if (dir !== 0xff && d !== dir) continue;
+			px[f * dirs + d] = s.px[sf * s.dirs + (dir === 0xff && d < s.dirs ? d : 0)];
+		}
+	}
+	const delays = Array.from({ length: frames }, (_, f) => t.delay[f] || 1);
+	if (frame !== 0xff && delay > 0) delays[frame] = delay;
+	Object.assign(t, { px, dirs, frames, delay: frames > 1 ? delays : [] });
 }
 function remap(ic, w, h, f) { // f(x, y) -> source [x, y] or null, per destination pixel
 	for (const s of ic.states) s.px = s.px.map(p => {
@@ -159,12 +205,23 @@ async function buildDdmi(buf, loadResource) {
 	const stack = [];
 	const u8 = () => buf[o++], u16 = () => { const v = buf.readUInt16LE(o); o += 2; return v; }, f32 = () => { const v = buf.readFloatLE(o); o += 4; return v; };
 	const icon = v => (v && v.icon ? v.icon : null);
+	// a file pushed without icon() ("01 i, 08": new /icon(file)) becomes the icon it holds once an op needs it
+	// (a copy: the loaded sheet is kept for other recipes, and the ops below change their icon in place)
+	const realize = async v => {
+		if (v && v.file !== undefined && !v.icon) {
+			const r = await loadResource(v.file), dmi = Buffer.isBuffer(r) ? loadDmi(r) : loadDmi(r.data, r.id);
+			v.icon = { w: dmi.w, h: dmi.h, states: dmi.states.map(s => ({ ...s, px: s.px.slice() })) };
+		}
+		return icon(v);
+	};
+	const top = async () => { for (let k = stack.length - 1; k >= 0; k--) if (stack[k]) return realize(stack[k]); return null; };
 	while (o < end) {
 		const op = u8();
 		if (op === 0x01) { stack.push({ file: buf.readUInt32LE(o) }); o += 4; }
 		else if (op === 0x08) stack.push(null);
 		else if (op === 0x05) { const z = buf.indexOf(0, o); stack.push({ str: buf.toString('utf8', o, z) }); o = z + 1; }
 		else if (op === 0x03) { stack.push({ color: [buf[o], buf[o + 1], buf[o + 2], buf[o + 3]] }); o += 4; }
+		else if (op === 0x04) { stack.push({ num: buf.readFloatLE(o) }); o += 4; }
 		else if (op === 0x40) {
 			const dir = u8(), frame = u8(), moving = u8();
 			let state = null, file = null;
@@ -186,36 +243,35 @@ async function buildDdmi(buf, loadResource) {
 			stack.push({ icon: ic });
 		} else if (op === 0x42 || op === 0x4d) {
 			const mode = u8(), x = op === 0x4d ? u16() : 1, y = op === 0x4d ? u16() : 1;
-			const src = stack.pop(), dst = icon(stack[stack.length - 1]);
+			const src = stack.pop(), dst = await top();
 			if (!dst) throw new Error('Blend without an icon');
-			if (src && src.color) blendColor(dst, src.color, mode); else if (icon(src)) blendIcon(dst, icon(src), mode, x, y);
+			if (src && src.color) blendColor(dst, src.color, mode); else if (await realize(src)) blendIcon(dst, icon(src), mode, x, y);
 		} else if (op === 0x41) {
 			const dir = u8(), frame = u8(), delay = f32(), moving = u8();
-			const name = stack.pop(), src = icon(stack.pop()), dst = icon(stack[stack.length - 1]);
+			const name = stack.pop(), src = await realize(stack.pop()), dst = await top();
 			if (!dst || !src) throw new Error('Insert without icons');
-			const s = src.states[0];
-			if (s) dst.states = dst.states.filter(q => q.name !== (name && name.str) || dir !== 0xff || frame !== 0xff).concat([{ ...s, name: name ? name.str : '', movement: moving ? 1 : 0, delay: delay > 0 ? [delay] : s.delay }]);
+			if (src.states[0]) insertState(dst, src.states[0], name && name.str !== undefined ? name.str : '', dir, frame, delay, moving === 1 ? 1 : 0);
 		} else if (op === 0x43) {
 			const k = [f32(), f32(), f32()];
-			eachFrame(icon(stack[stack.length - 1]), p => { const d = Buffer.from(p); for (let i = 0; i < d.length; i += 4) for (let c = 0; c < 3; c++) if (k[c] >= 0) d[i + c] = Math.min(255, d[i + c] * k[c]); return d; });
+			eachFrame(await top(), p => { const d = Buffer.from(p); for (let i = 0; i < d.length; i += 4) for (let c = 0; c < 3; c++) if (k[c] >= 0) d[i + c] = Math.min(255, d[i + c] * k[c]); return d; });
 		} else if (op === 0x44) {
-			const d = DIRS[u8()] || 0, ic = icon(stack[stack.length - 1]);
+			const d = DIRS[u8()] || 0, ic = await top();
 			const fx = d & 12, fy = d & 3;
 			remap(ic, ic.w, ic.h, (x, y) => [fx ? ic.w - 1 - x : x, fy ? ic.h - 1 - y : y]);
 		} else if (op === 0x45) {
-			const ang = f32() * Math.PI / 180, ic = icon(stack[stack.length - 1]), cx = (ic.w - 1) / 2, cy = (ic.h - 1) / 2;
+			const ang = f32() * Math.PI / 180, ic = await top(), cx = (ic.w - 1) / 2, cy = (ic.h - 1) / 2;
 			const c = Math.cos(ang), s = Math.sin(ang); // clockwise on screen (y down)
 			remap(ic, ic.w, ic.h, (x, y) => { const dx = x - cx, dy = y - cy; return [Math.round(cx + dx * c + dy * s), Math.round(cy - dx * s + dy * c)]; });
 		} else if (op === 0x47) {
-			const d = DIRS[u8()] || 0, n = u16(), wrap = u8(), ic = icon(stack[stack.length - 1]);
+			const d = DIRS[u8()] || 0, n = u16(), wrap = u8(), ic = await top();
 			const dx = d & 4 ? n : d & 8 ? -n : 0, dy = d & 1 ? -n : d & 2 ? n : 0; // rows go down
 			remap(ic, ic.w, ic.h, (x, y) => { let sx = x - dx, sy = y - dy; if (wrap) { sx = (sx % ic.w + ic.w) % ic.w; sy = (sy % ic.h + ic.h) % ic.h; } return [sx, sy]; });
 		} else if (op === 0x48) {
 			u8();
-			const to = stack.pop(), from = stack.pop(), ic = icon(stack[stack.length - 1]);
+			const to = stack.pop(), from = stack.pop(), ic = await top();
 			if (to && from && to.color && from.color) eachFrame(ic, p => { const d = Buffer.from(p); for (let i = 0; i < d.length; i += 4) if (d[i] === from.color[0] && d[i + 1] === from.color[1] && d[i + 2] === from.color[2] && d[i + 3] === from.color[3]) to.color.forEach((v, c) => { d[i + c] = v; }); return d; });
 		} else if (op === 0x4a) {
-			const n = u8(), m = Array.from({ length: n }, f32), ic = icon(stack[stack.length - 1]);
+			const n = u8(), m = Array.from({ length: n }, f32), ic = await top();
 			// rows of 3 (rgb) or 4 (rgba) inputs, then the constant row
 			const w = n === 12 || n === 9 ? 3 : 4, rows = n / w;
 			eachFrame(ic, p => {
@@ -228,7 +284,7 @@ async function buildDdmi(buf, loadResource) {
 				return d;
 			});
 		} else if (op === 0x49) {
-			const x1 = u16(), y1 = u16(), x2 = u16(), y2 = u16(), col = stack.pop(), ic = icon(stack[stack.length - 1]);
+			const x1 = u16(), y1 = u16(), x2 = u16(), y2 = u16(), col = stack.pop(), ic = await top();
 			if (col && col.color) eachFrame(ic, (p, w, h) => {
 				const d = Buffer.from(p);
 				for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
@@ -238,16 +294,18 @@ async function buildDdmi(buf, loadResource) {
 				return d;
 			});
 		} else if (op === 0x4b) {
-			const w = u16(), h = u16(), ic = icon(stack[stack.length - 1]), ow = ic.w, oh = ic.h;
+			const w = u16(), h = u16(), ic = await top(), ow = ic.w, oh = ic.h;
 			remap(ic, w, h, (x, y) => [Math.floor(x * ow / w), Math.floor(y * oh / h)]);
 		} else if (op === 0x4c) {
-			const x1 = u16(), y1 = u16(), x2 = u16(), y2 = u16(), ic = icon(stack[stack.length - 1]);
+			const x1 = u16(), y1 = u16(), x2 = u16(), y2 = u16(), ic = await top();
 			remap(ic, x2 - x1, y2 - y1, (x, y) => [x + x1, y + y1]);
-		} else throw new Error('DDMI op ' + op.toString(16) + ' at ' + (o - 1));
+		} else throw new Error('DDMI op ' + op.toString(16) + ' at ' + (o - 1) + ': ' + buf.toString('hex', 0, Math.min(end, 256)));
 	}
-	const top = icon(stack[stack.length - 1]);
-	if (!top) throw new Error('DDMI left no icon');
-	return saveDmi(top);
+	const result = await top();
+	if (!result) throw new Error('DDMI left no icon');
+	return saveDmi(result);
 }
 
-module.exports = { buildDdmi, decodeSheet };
+const sheetStats = () => ({ sheets: sheets.size, sheetMB: Math.round(sheetBytes / 1e6) });
+
+module.exports = { buildDdmi, decodeSheet, sheetStats };

@@ -3,6 +3,7 @@
 //
 // usage: node server.js --dd 127.0.0.1:51984 --rsc path\to\world.rsc [--rsc world.dyn.rsc] [--port 8080]
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
@@ -14,9 +15,11 @@ const zlib = require('zlib');
 const { Rsc, parseRsc } = require('./proto/rsc');
 const { crc: resourceCrc, decipher } = require('./proto/rsccrypt');
 const { readDmiMeta } = require('./dmi');
-const { buildDdmi, decodeSheet } = require('./ddmi');
+const { buildDdmi, decodeSheet, sheetStats } = require('./ddmi');
 const { decodePng, encodePng } = require('./png');
 const { fontFamily, hasGlyph } = require('./font');
+const { Auth } = require('./auth');
+const { gameReady, gameStatus, worldStatus } = require('./game-status');
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf('--' + name); return i >= 0 ? args[i + 1] : def; };
@@ -29,7 +32,7 @@ function serverAddress(text) {
 	return m && +m[2] > 0 && +m[2] < 65536 ? m[1].toLowerCase() + ':' + +m[2] : null;
 }
 const httpPort = +opt('port', 8080);
-// Debug mode (lighting switch, recording a session for bug reports) is for the gateway's admins: a page opened on
+// Debug mode (the lighting switch) is for the gateway's admins: a page opened on
 // this machine itself, or one that knows the admin token (--admin-token or SEEKER_ADMIN_TOKEN; the page is
 // opened once with ?admin=<token> and keeps it). Players never get it.
 const adminToken = opt('admin-token', process.env.SEEKER_ADMIN_TOKEN || '');
@@ -39,7 +42,6 @@ function isAdminPage(req, given) {
 	if (!adminToken || typeof given !== 'string' || given.length !== adminToken.length) return false;
 	return require('crypto').timingSafeEqual(Buffer.from(given), Buffer.from(adminToken));
 }
-const RECORDS = path.join(__dirname, 'records');
 const rscFiles = optAll('rsc');
 
 // Type 26 login payload DreamSeeker sends with no BYOND pager running (guest login).
@@ -63,6 +65,37 @@ async function guestTopic(target, own = '') {
 function loginTopic(text) {
 	const t = String(text || '').trim().replace(/^\?+/, '');
 	return t && t.length <= 2000 && !/[\x00-\x1f]/.test(t) ? '?' + t : '';
+}
+
+// Paradise ignores topics beyond SECOND_TOPIC_LIMIT (10) a second. DreamSeeker never gets there because its browser
+// merges rapid byond:// navigations into one, while every page here sends each of them: the stat panel alone sends
+// one per tab on every verb update, ~30 at login, and the tgui windows' own messages then get thrown away.
+// So topics go out at most 8 a second and wait their turn instead, and a stat panel message that is already
+// waiting or went out in the last 2 s is dropped (its handlers only set state).
+const TOPICS_PER_SECOND = 8;
+function topicPacer(send) {
+	const queue = [], sent = [], recentPanel = new Map();
+	let timer = null;
+	const pump = () => {
+		timer = null;
+		const now = Date.now();
+		while (sent.length && now - sent[0] >= 1000) sent.shift();
+		while (queue.length && sent.length < TOPICS_PER_SECOND) { sent.push(now); send(queue.shift()); }
+		if (queue.length) timer = setTimeout(pump, 1005 - (now - sent[0]));
+	};
+	const pace = q => {
+		if (/(?:^|[?&])window_id=statbrowser(?:&|$)/.test(q)) {
+			const now = Date.now();
+			if (queue.includes(q) || now - (recentPanel.get(q) || 0) < 2000) return;
+			for (const [key, at] of recentPanel) if (now - at >= 2000) recentPanel.delete(key);
+			recentPanel.set(q, now);
+		}
+		if (queue.length >= 200) return;
+		queue.push(q);
+		if (!timer) pump();
+	};
+	pace.stop = () => { clearTimeout(timer); timer = null; queue.length = 0; };
+	return pace;
 }
 
 // ---------- resources ----------
@@ -95,10 +128,29 @@ function iconFrame(e, q) {
 	for (let y = 0; y < h; y++) px.data.copy(out, y * w * 4, ((sy + y) * px.width + sx) * 4, ((sy + y) * px.width + sx + w) * 4);
 	return encodePng(w, h, out);
 }
+// A deploy (TGS swaps the game directory) puts a new main archive at the same path while we still hold the old
+// one open: reopen it once the file under the path is no longer the one we index, checking at most every 5 s
+function reopenReplacedArchives() {
+	for (const a of archives) {
+		if (/\.dyn\.rsc$/i.test(a.file) || Date.now() - (a.checkedAt || 0) < 5000) continue;
+		a.checkedAt = Date.now();
+		let current;
+		try { current = fs.statSync(a.file); } catch (_) { continue; }
+		if (a.rsc.fd !== null) {
+			const open = fs.fstatSync(a.rsc.fd);
+			if (open.ino === current.ino && open.size === current.size && open.mtimeMs === current.mtimeMs) continue;
+			fs.closeSync(a.rsc.fd);
+		}
+		a.rsc = new Rsc(a.file); a.indexedAt = Date.now();
+		metaCache.clear();
+		console.log('reopened replaced archive ' + a.file + ' (' + a.rsc.entries.size + ' resources)');
+	}
+}
 function findResource(id) {
+	reopenReplacedArchives();
 	for (const a of archives) { const e = a.rsc.get(id); if (e) return e; }
 	// the dynamic archive (*.dyn.rsc) grows while the world runs: reindex it, at most every second (it takes ~10 ms;
-	// the main archive never changes, and some ids never turn up: icons the client builds itself)
+	// some ids never turn up: icons the client builds itself)
 	for (const a of archives) {
 		if (!/\.dyn\.rsc$/i.test(a.file) || Date.now() - a.indexedAt < 1000) continue;
 		if (a.rsc.fd !== null) fs.closeSync(a.rsc.fd);
@@ -113,11 +165,21 @@ function findResource(id) {
 // files' CRCs, so one cache serves every server.
 const CACHE = path.resolve(opt('cache', path.join(__dirname, 'cache')));
 fs.mkdirSync(CACHE, { recursive: true });
+// admins' stats logs (?stats=1): next to the cache, the code directory may be read-only (systemd ProtectSystem)
+const RECORDS = path.join(CACHE, '..', 'records');
+const auth = process.env.SEEKER_ORIGIN ? new Auth({
+	origin: process.env.SEEKER_ORIGIN,
+	stateFile: process.env.SEEKER_AUTH_STATE || path.join(CACHE, '..', 'sessions.json'),
+	socketPath: process.env.SEEKER_AUTH_SOCKET,
+}) : null;
+if (auth) auth.guestsAllowed = () => gameStatus(fixedServer).then(status => status.guests !== false);
+if (auth) auth.listen();
 const hex8 = id => (id >>> 0).toString(16).padStart(8, '0');
 const cached = new Map(); // id -> resource type
 for (const f of fs.readdirSync(CACHE)) { const m = f.match(/^([0-9a-f]{8})_(\d+)$/); if (m) cached.set(parseInt(m[1], 16) >>> 0, +m[2]); }
 function cachedResource(id) {
-	if (builtIcons.has(id)) return builtIcons.get(id);
+	const built = builtIcons.get(id);
+	if (built) { builtIcons.delete(id); builtIcons.set(id, built); return built; } // most recently used last
 	const type = cached.get(id);
 	if (type === 12) return null; // a run-time icon's recipe: built again for the session that lists it
 	if (type === undefined) return null;
@@ -131,9 +193,48 @@ const resWaiters = new Map(); // id -> [resolve]
 const resTypes = new Map(); // id -> resource type as a server lists it (for debugging)
 const resFetchers = new Set(); // live sessions' id -> bool (false: that server has not listed the id)
 // Icons built from a world's run-time recipes (DDMI) refer to that world's resource list: kept in memory only
+// (the gateway outlives rounds and serves every player: most recently used up to BUILT_MAX_BYTES; one pushed out is
+// asked from the server and built again when someone needs it)
 const builtIcons = new Map(); // id -> { id, type, data }
+// recipes of run-time icons, kept on disk with the [index, resource id] pairs they use (see reuseBuiltIcon): the
+// icon is built again from them, so a fix to the builder reaches icons the server will not send again
+const BUILT = path.join(CACHE, '..', 'built');
+fs.mkdirSync(BUILT, { recursive: true });
+for (const f of fs.readdirSync(BUILT)) { const file = path.join(BUILT, f); if (Date.now() - fs.statSync(file).mtimeMs > 3 * 86400000) fs.unlinkSync(file); }
+function saveBuiltIcon(id, recipe, deps) {
+	try { fs.writeFileSync(path.join(BUILT, hex8(id) + '.ddmi'), recipe); fs.writeFileSync(path.join(BUILT, hex8(id) + '.json'), JSON.stringify(deps)); } catch (_) {}
+}
+// Files the server sends by name (its asset cache at login: tgui bundles, sprite sheets, fonts), kept by CRC for
+// every session as DreamSeeker keeps them in its cache: the next login answers "I have it" instead of waiting
+const FILES = path.join(CACHE, '..', 'files');
+fs.mkdirSync(FILES, { recursive: true });
+for (const f of fs.readdirSync(FILES)) { const file = path.join(FILES, f); if (Date.now() - fs.statSync(file).mtimeMs > 7 * 86400000) fs.unlinkSync(file); }
+function keptFile(crc) {
+	const file = path.join(FILES, hex8(crc));
+	try { const data = fs.readFileSync(file); fs.utimesSync(file, new Date(), new Date()); return data; } catch (_) { return null; }
+}
+function keepFile(crc, data) {
+	try { fs.writeFileSync(path.join(FILES, hex8(crc)), data); } catch (_) {}
+}
+function loadBuiltIcon(id) {
+	try { return { recipe: fs.readFileSync(path.join(BUILT, hex8(id) + '.ddmi')), deps: JSON.parse(fs.readFileSync(path.join(BUILT, hex8(id) + '.json'), 'utf8')) }; } catch (_) { return null; }
+}
+const BUILT_MAX_BYTES = 128e6;
+let builtBytes = 0;
+function keepBuilt(id, entry) {
+	const had = builtIcons.get(id);
+	if (had) { builtIcons.delete(id); builtBytes -= had.data.length; }
+	builtIcons.set(id, entry);
+	builtBytes += entry.data.length;
+	for (const [k, old] of builtIcons) {
+		if (builtBytes <= BUILT_MAX_BYTES || k === id) break;
+		builtIcons.delete(k);
+		metaCache.delete(k);
+		builtBytes -= old.data.length;
+	}
+}
 function storeResource(id, type, data, persist = true) {
-	if (!persist) builtIcons.set(id, { id, type, data });
+	if (!persist) keepBuilt(id, { id, type, data });
 	else if (!cached.has(id)) {
 		fs.writeFileSync(path.join(CACHE, hex8(id) + '_' + type), data);
 		cached.set(id, type);
@@ -162,6 +263,18 @@ function fetchResource(id, ms = 20000) {
 			resolve(null);
 		}, ms);
 	});
+}
+
+// What the gateway holds and how late its one thread runs (/__stats; ?stats=1 pages log it)
+const loopDelay = require('perf_hooks').monitorEventLoopDelay({ resolution: 20 });
+loopDelay.enable();
+function gatewayStats() {
+	const mem = process.memoryUsage(), ms = v => Math.round(v / 1e5) / 10;
+	const out = { uptimeS: Math.round(process.uptime()), rssMB: Math.round(mem.rss / 1e6), heapMB: Math.round(mem.heapUsed / 1e6), externalMB: Math.round(mem.external / 1e6),
+		sessions: sessions.size, builtIcons: builtIcons.size, builtMB: Math.round(builtBytes / 1e6), ...sheetStats(), metaCache: metaCache.size, assetNames: assetNames.size,
+		loopP50ms: ms(loopDelay.percentile(50)), loopP99ms: ms(loopDelay.percentile(99)), loopMaxMs: ms(loopDelay.max) };
+	loopDelay.reset();
+	return out;
 }
 
 // ---------- http ----------
@@ -199,13 +312,66 @@ function sendBody(req, res, headers, data, packable, key = data) {
 	return res.end(data);
 }
 const PUBLIC = path.join(__dirname, 'public');
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+	'.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
+	'.txt': 'text/plain; charset=utf-8', '.xml': 'application/xml; charset=utf-8', '.webmanifest': 'application/manifest+json' };
+function staticVersion(name) {
+	try { const s = fs.statSync(path.join(PUBLIC, name)); return s.size.toString(36) + Math.floor(s.mtimeMs).toString(36); } catch (_) { return '0'; }
+}
+// the landing page's pictures and fonts change rarely: a week in browsers and Cloudflare
+const STATIC_ASSET = /^\/(img|fonts)\/|^\/favicon\.ico$/;
 // Browser windows load their files by name; names are registered per session by message 254.
 const sessions = new Map(); // sid -> { assets: Map(name -> rsc id) }
-let nextSid = 1;
+if (auth) auth.onRevoke = owner => {
+	for (const session of sessions.values()) if (session.owner === owner) session.kick();
+};
+// Session ids are in every window URL and accept Topics: random, so one page cannot act for another
+function newSid() {
+	let sid;
+	do sid = crypto.randomInt(1, 2 ** 48); while (sessions.has(sid));
+	return sid;
+}
 
-const server = http.createServer(async (req, res) => {
+// A bad request (a malformed %-escape in the path, ...) must not take the gateway and every session down
+const server = http.createServer((req, res) => handleHttp(req, res).catch(err => {
+	console.log('http ' + String(req.url).split('?')[0].slice(0, 200) + ': ' + err.message);
+	if (!res.headersSent) res.writeHead(400);
+	res.end();
+}));
+
+async function handleHttp(req, res) {
 	const url = new URL(req.url, 'http://x');
+	res.setHeader('Referrer-Policy', 'no-referrer');
+	res.setHeader('X-Content-Type-Options', 'nosniff');
+	if (auth) {
+		const landing = url.pathname === '/login.html' || url.pathname === '/';
+		if (landing || url.pathname.startsWith('/auth/')) {
+			res.setHeader('Cache-Control', 'no-store');
+			res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+		}
+		// /__dump and /__stats stay open to requests made on the gateway's own machine (not through the proxy: nginx adds its headers)
+		const onHost = !req.headers['x-forwarded-for'] && !req.headers['x-real-ip'] && /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+		if (url.pathname.startsWith('/__') && !((url.pathname === '/__dump' || url.pathname === '/__stats') && onHost)) { res.writeHead(404); return res.end(); }
+		if (url.pathname === '/game-status') {
+			res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+			const [status, world] = await Promise.all([gameStatus(fixedServer), worldStatus(fixedServer)]);
+			return res.end(JSON.stringify({ ...status, world }));
+		}
+		if (await auth.handle(req, res, url)) return;
+		const session = auth.session(req);
+		// the landing page is the site's address for visitors and search engines; the game opens there once logged in
+		if (url.pathname === '/' && (!session?.active || !await gameReady(fixedServer))) {
+			res.writeHead(200, { 'Content-Type': MIME['.html'] });
+			return fs.createReadStream(path.join(PUBLIC, 'login.html')).pipe(res);
+		}
+		if (url.pathname === '/') res.removeHeader('Content-Security-Policy'); // the game page itself runs world-made HTML
+		const owned = decodeURIComponent(url.pathname).match(/^\/a\/(\d+)(?:\/|$)/);
+		if (owned && (!session?.active || sessions.get(+owned[1])?.owner !== session)) {
+			res.writeHead(403, { 'Cache-Control': 'no-store' });
+			return res.end();
+		}
+		if (url.pathname === '/' || url.pathname.startsWith('/a/')) res.setHeader('Cache-Control', 'no-store');
+	}
 	// debugging aid: the page can POST a PNG of the map canvas, saved as $SEEKER_SNAP_DIR/<name>.png
 	if (process.env.SEEKER_SNAP_DIR && req.method === 'POST' && url.pathname === '/__snap') {
 		const chunks = [];
@@ -214,17 +380,58 @@ const server = http.createServer(async (req, res) => {
 		fs.writeFileSync(path.join(process.env.SEEKER_SNAP_DIR, name + '.png'), Buffer.concat(chunks));
 		res.writeHead(204); return res.end();
 	}
-	// debugging aid (local only): what the open pages are drawing, from their own state
-	if (url.pathname === '/__dump' && /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '')) {
+	// debugging aids (on the gateway's machine only): behind a reverse proxy every request comes from loopback, so
+	// proxied ones (X-Forwarded-For / X-Real-IP) are not local
+	const onHostOnly = !req.headers['x-forwarded-for'] && !req.headers['x-real-ip'] && /^(::1|127\.|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+	if (url.pathname === '/__stats' && onHostOnly) {
+		res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+		return res.end(JSON.stringify(gatewayStats(), null, 1));
+	}
+	if (url.pathname === '/__dump' && onHostOnly) {
 		const live = [...sessions.values()].filter(s => s.dump);
 		const out = await Promise.all(live.map(s => new Promise(done => { s.dump(done); setTimeout(() => done(null), 3000); })));
 		res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
 		return res.end(JSON.stringify(out, null, 1));
 	}
+	// Speak an external line in-game (local only): voice tools (HEAVYLOVE) post recognised speech here and the
+	// gateway runs it as a "say" verb, exactly like the page's command box. GET /voice?text=..&verb=..&sid=.. or
+	// POST /voice with JSON {text, verb, sid}. verb defaults to "Сказать"; omit sid to use the newest live session.
+	// Never through the proxy, and off on a public gateway with player logins (it speaks for someone's session).
+	if (url.pathname === '/voice' && onHostOnly && !auth) {
+		let text = url.searchParams.get('text') || '';
+		let verb = url.searchParams.get('verb');
+		let sid = url.searchParams.get('sid');
+		if (req.method === 'POST') {
+			const chunks = [];
+			for await (const c of req) chunks.push(c);
+			try {
+				const b = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+				if (b.text != null) text = String(b.text);
+				if (b.verb != null) verb = String(b.verb);
+				if (b.sid != null) sid = b.sid;
+			} catch (_) {}
+		}
+		const reply = (code, obj) => {
+			res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+			res.end(JSON.stringify(obj));
+		};
+		const live = [...sessions.values()].filter(s => s.command);
+		const sess = sid != null && sid !== '' ? sessions.get(+sid) : live[live.length - 1];
+		if (!sess || !sess.command) return reply(503, { ok: false, error: 'нет активной сессии Seeker' });
+		if (!String(text).trim()) return reply(400, { ok: false, error: 'пустой текст' });
+		if (verb == null) verb = 'Сказать';
+		const command = verb ? verb + ' "' + String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' : String(text);
+		let ok = false;
+		try { ok = sess.command(command); } catch (e) { return reply(500, { ok: false, error: String(e && e.message || e) }); }
+		return reply(200, { ok, sid: sess.sid, command });
+	}
 	// Pages send a Topic by XHR GET "?params" or by navigating to "?params" (DreamSeeker intercepts both);
 	// relative to <base> it lands here. 204 keeps a navigating page where it is, as DreamSeeker does.
 	const tm = url.pathname.match(/^\/a\/(\d+)\/$/);
 	if (tm && url.search.length > 1) {
+		if (auth && (req.headers.origin && req.headers.origin !== auth.originOf(req) || req.headers['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin' && req.headers['sec-fetch-site'] !== 'none')) {
+			res.writeHead(403); return res.end();
+		}
 		const sess = sessions.get(+tm[1]);
 		if (sess && sess.topic) sess.topic(url.search);
 		res.writeHead(204);
@@ -239,7 +446,7 @@ const server = http.createServer(async (req, res) => {
 		const e = r && await fetchResource(r.id);
 		const png = e && iconFrame(e, url.searchParams);
 		if (!png) { res.writeHead(404, { 'Cache-Control': 'no-store' }); return res.end(); }
-		res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=86400' });
+		res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': auth ? 'private, no-store' : 'max-age=86400' });
 		return res.end(png);
 	}
 	// A world resource by its id (its CRC): the same address in every session, so the browser keeps it for good.
@@ -269,7 +476,7 @@ const server = http.createServer(async (req, res) => {
 			if (sess && !sess.files.has(name) && !sess.assets.has(name) && sess.aliases.has(name)) name = sess.aliases.get(name);
 			const sent = sess && sess.files.get(name); // files the server pushed with message 159 / browse(file=)
 			const id = sess && sess.assets.get(name);
-			return sent ? { data: sent } : id !== undefined && fetchResource(id);
+			return sent ? { data: sent, crc: sent.crc } : id !== undefined && fetchResource(id).then(e => e && { data: e.data, crc: id });
 		};
 		// tgui may ask for a file before the server's asset/mappings message names it: give that a moment. A file
 		// the server has named but not sent is waited for once (fetchResource), not again on every retry: that
@@ -331,22 +538,51 @@ const server = http.createServer(async (req, res) => {
 			const id = assetIdByName(bare);
 			if (id !== undefined) { res.writeHead(302, { Location: '/c/' + hex8(id) + '/' + encodeURIComponent(bare), 'Cache-Control': 'no-store' }); return res.end(); }
 			for (const s of sessions.values()) {
+				if (auth && s.owner !== auth.session(req)) continue;
 				if (!s.files.get(bare)) continue;
 				return sendBody(req, res, { 'Content-Type': MIME[path.extname(bare)] || 'application/octet-stream', 'Cache-Control': 'no-cache' }, s.files.get(bare), true);
 			}
 		}
 		res.writeHead(404); return res.end('not found');
 	}
-	// the page itself: kept by the browser but checked each time (ETag), so a new version is picked up at once
+	// the page and its files: kept by the browser but checked each time (ETag), so a new version is picked up at
+	// once; the landing page's pictures and fonts for a week
 	const st = fs.statSync(file), etag = '"' + st.size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
-	if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' }); return res.end(); }
-	return sendBody(req, res, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag },
-		fs.readFileSync(file), /\.(js|css|html)$/.test(file), 'static:' + file + etag);
-});
+	// Cloudflare turns "no-cache" into four hours in the browser, so an update was not seen until then: the game
+	// page is never kept and names its scripts by version (?v=), and a versioned script is kept for good
+	if (url.pathname === '/' || url.pathname === '/index.html') {
+		const html = fs.readFileSync(file, 'utf8').replace(/src="(client|render)\.js"/g, (_, n) => 'src="' + n + '.js?v=' + staticVersion(n + '.js') + '"');
+		return sendBody(req, res, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-store' }, Buffer.from(html), true, 'page:' + etag + html.length);
+	}
+	const cache = STATIC_ASSET.test(url.pathname) ? 'public, max-age=604800'
+		: url.searchParams.has('v') && /^\/(client|render)\.js$/.test(url.pathname) ? 'public, max-age=31536000, immutable' : 'no-cache';
+	if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': cache }); return res.end(); }
+	return sendBody(req, res, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': cache, ETag: etag },
+		fs.readFileSync(file), /\.(js|css|html|svg|txt|xml|webmanifest)$/.test(file), 'static:' + file + etag);
+}
 
 // ---------- sessions ----------
-const wss = new WebSocketServer({ server, path: '/ws' });
+// pages send short JSON (keys, clicks, dialog answers); without player logins the 4 MiB cap leaves room for the dump's
+// picture of the map, with them a page leaves the picture out to stay under the cap (an oversized message drops the socket)
+const WS_LIMIT_WITH_LOGINS = 65536;
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: auth ? WS_LIMIT_WITH_LOGINS : 4 * 1024 * 1024,
+	verifyClient: ({ req }, done) => {
+		if (!auth) return done(true);
+		if (req.headers.origin !== auth.originOf(req) || !auth.session(req)?.active) return done(false, 403, 'Login required');
+		gameReady(fixedServer).then(ready => {
+			if (!auth.session(req)?.active) return done(false, 403, 'Login required');
+			done(ready, ready ? 101 : 503, ready ? undefined : 'Game authentication update pending');
+		}, () => done(false, 503));
+	},
+});
 wss.on('connection', (ws, req) => {
+	ws.on('error', () => {});
+	const owner = auth?.session(req);
+	if (auth && !owner?.active) { ws.close(4003, 'session expired'); return; }
+	const expiryTimer = auth && setInterval(() => {
+		if (!owner.active || owner.expires <= Date.now()) ws.close(4003, 'session expired');
+	}, 15000).unref();
+	ws.on('close', () => { if (expiryTimer) clearInterval(expiryTimer); });
 	// Messages decoded from one read of the server's socket (one server tick, usually) go to the page in one
 	// frame, so it never draws half a tick: SS13 projectiles step a tile in one message and pull their pixel
 	// offset back in the next.
@@ -361,39 +597,22 @@ wss.on('connection', (ws, req) => {
 	};
 	const closeWs = (...args) => { flush(); ws.close(...args); };
 	const wsQuery = new URL(req.url, 'http://x').searchParams;
-	const target = fixedServer || serverAddress(wsQuery.get('server'));
-	const ownTopic = loginTopic(wsQuery.get('login') || (String(wsQuery.get('server') || '').match(/\?(.*)$/s) || [])[1]);
+	// the gateway's admins (see isAdminPage) may point their own page at another server; everyone else stays on --dd
+	const admin = isAdminPage(req, wsQuery.get('admin'));
+	const askedServer = serverAddress(wsQuery.get('server'));
+	const target = (admin && askedServer) || fixedServer || askedServer;
+	// a player's login ticket is for the gateway's own game and must never go to another server
+	const ticketLogin = !!auth && target === fixedServer;
+	const ownTopic = ticketLogin ? '' : loginTopic(wsQuery.get('login') || (String(wsQuery.get('server') || '').match(/\?(.*)$/s) || [])[1]);
 	if (!target) { send({ t: 'needServer' }); closeWs(4001, 'no server'); return; }
 	const [ddHost, ddPort] = target.split(':');
 	send({ t: 'server', addr: target, fixed: !!fixedServer });
 	let conn = null;
 	let map = new MapState();
-	const sid = nextSid++;
-	const sess = { server: target, assets: new Map(), windows: new Set(), files: new Map(), aliases: new Map() };
+	const sid = newSid();
+	const sess = { owner, server: target, assets: new Map(), windows: new Set(), files: new Map(), aliases: new Map() };
 	const transfers = new Map(); // crc -> { name, size, action, chunks }
-	// Topics go out at most TOPIC_RATE a second, and the same one again within a second is dropped: SS13 worlds
-	// ignore a client's 11th Topic in a second ("слишком много действий за секунду"), and at login the stat
-	// panel answers each of several init_verbs with a Send-Tabs per tab, dozens at once. Nothing else is lost,
-	// it only waits its turn.
-	const TOPIC_RATE = 8;
-	const topicQueue = [], topicSent = [];
-	let topicTimer = null;
-	const pumpTopics = () => {
-		topicTimer = null;
-		const now = Date.now();
-		while (topicSent.length && now - topicSent[0] >= 1000) topicSent.shift();
-		while (topicQueue.length && topicSent.length < TOPIC_RATE) {
-			if (conn) conn.send(129, Buffer.from(topicQueue.shift() + '\0', 'utf8'));
-			else topicQueue.shift();
-			topicSent.push(now);
-		}
-		if (topicQueue.length) topicTimer = setTimeout(pumpTopics, 1000 - (now - topicSent[0]) + 5);
-	};
-	sess.topic = q => {
-		if (topicQueue.includes(q)) return; // the same one still waiting
-		topicQueue.push(q);
-		if (!topicTimer) pumpTopics();
-	};
+	sess.topic = topicPacer(q => { if (conn) conn.send(129, Buffer.from(q + '\0', 'utf8')); });
 	sess.resource = i => map.resources[i];
 	// Every page logs in with the same guest key, and the server drops the older login, sometimes without saying
 	// so (no message 0): that page would reconnect and drop the newer one, over and over, across browsers.
@@ -404,8 +623,8 @@ wss.on('connection', (ws, req) => {
 		if (conn) { conn.removeAllListeners(); conn.on('error', () => {}); conn.close(); }
 		closeWs(4000, 'replaced');
 	};
-	for (const other of sessions.values()) if (other.kick && other.server === target) other.kick();
-	sess.dump = answer => { sess.dumped = answer; send({ t: 'dump' }); };
+	for (const other of sessions.values()) if (other.kick && other.server === target && (!auth || other.owner?.guest === owner.guest || owner.ckey && other.owner?.ckey === owner.ckey)) other.kick();
+	sess.dump = answer => { sess.dumped = answer; send({ t: 'dump', limit: auth ? WS_LIMIT_WITH_LOGINS - 1024 : 0 }); };
 	const verbs = new Map(); // lower-case verb name -> [ids] (several types may have a verb of the same name)
 	const verbDefs = new Map(); // verb id -> { id, name, category, srcSetting, flags, args: [{ types, source }] }
 	const me = { ref: null, pos: null };
@@ -449,7 +668,9 @@ wss.on('connection', (ws, req) => {
 		if (i === undefined || !conn) return false;
 		const t = resAsked.get(id);
 		if (t && Date.now() - t < 15000) return true;
+		if (map.resources[i].type === 12 && reuseBuiltIcon(id)) return true;
 		resAsked.delete(id); resAsked.set(id, Date.now());
+		if (process.env.SEEKER_DEBUG_RES) console.log('[' + sid + '] ask ' + hex8(id) + ' #' + i + ' type=' + map.resources[i].type);
 		resQueue.push(i);
 		if (resQueue.length === 1) setImmediate(() => {
 			const b = Buffer.alloc(resQueue.length * 4);
@@ -464,11 +685,21 @@ wss.on('connection', (ws, req) => {
 	const tookResource = (id, type, data) => {
 		resAsked.delete(id);
 		if (type !== 12) return storeResource(id, type, data);
+		const deps = [];
 		buildDdmi(data, async i => {
 			const r = map.resources[i], e = r && await fetchResource(r.id);
 			if (!e) throw new Error('resource #' + i + ' did not come');
+			deps.push([i, r.id]);
 			return { id: 'res:' + r.id, data: e.data }; // keyed: its decoded sheet is kept (decodeSheet)
-		}).then(png => storeResource(id, 3, png, false), err => console.log('[' + sid + '] run-time icon ' + hex8(id) + ': ' + err.message));
+		}).then(png => { storeResource(id, 3, png, false); saveBuiltIcon(id, data, deps); }, err => console.log('[' + sid + '] run-time icon ' + hex8(id) + ': ' + err.message));
+	};
+	// The server sends a run-time icon to a key once per world run, so one built before a gateway restart is
+	// built again from its recipe on disk, as long as the indexes it uses still name the same resources here
+	const reuseBuiltIcon = id => {
+		const built = loadBuiltIcon(id);
+		if (!built || !built.deps.every(([i, rid]) => map.resources[i] && map.resources[i].id === rid)) return false;
+		setImmediate(() => tookResource(id, 12, built.recipe));
+		return true;
 	};
 	// Entries of a "resources" fragment; enciphered ones (type | 0x80) are keyed by their real id, which their
 	// header hides: they come in the order asked (or of the list, when the server sends its whole .rsc at
@@ -505,6 +736,15 @@ wss.on('connection', (ws, req) => {
 
 	// Message 61 (u32 appearance ids) asks for appearance definitions the client does not have yet.
 	const wanted = new Set(), asked = new Map();
+	let windowCells = []; // [x, y] of the last turf window, in its order: message 32 gives their areas
+	// The u16 m, m × (u32 area, u32 appearance) that ends messages 32 and 241
+	function areaPairs(d, o) {
+		const out = [];
+		if (o + 2 > d.length) return out;
+		const m = d.readUInt16LE(o); o += 2;
+		for (let i = 0; i < m && o + 8 <= d.length; i++, o += 8) { out.push([d.readUInt32LE(o), d.readUInt32LE(o + 4)]); want(out[i][1]); }
+		return out;
+	}
 	function want(id) {
 		if (id === undefined || id === null || id === 0xffff || id === 0xffffffff || map.appearances.has(id)) return;
 		const t = asked.get(id);
@@ -535,24 +775,50 @@ wss.on('connection', (ws, req) => {
 	const NULL_ARG = Buffer.from([6]);
 
 	// Right-click menu of an atom, as DreamSeeker builds it: the atom's own verbs (src = the atom) and our verbs
-	// whose only argument takes this kind of atom (src = us, the atom as argument). Hidden and "." verbs are left out.
+	// whose only argument takes this kind of atom (src = us, the atom as argument), each only where the atom is in
+	// the verb's list. Hidden, popup_menu = 0 and "." verbs are left out.
 	const TYPE_BITS = { 1: 0x02, 2: 0x01, 3: 0x20 }; // atom type in commands -> input type mask (obj, mob, turf)
-	function atomMenu(atom, app) {
-		const shown = def => def && def.name && !def.name.startsWith('.') && !(def.flags & 0x81);
+	// A src or argument setting (u16): the high byte is the list, the low one its distance (0x7d and up: none).
+	// The type's default list is usr for a mob (never offered in menus, not even on oneself), usr.contents for an
+	// obj and view(0) for a turf; "usr" verbs are not offered either. where: { tile: [x, y] } on the map or
+	// { held: true } for a HUD object (an item in hand or pocket); mine: our tile. view() and range() hold what we
+	// carry, oview() leaves it out with us; an argument with no list of its own comes as view().
+	function inList(setting, atom, where, mine) {
+		const list = setting >> 8, dist = setting & 0xff;
+		const self = atom.type === 2 && atom.ref === me.ref;
+		const near = d => !!(where.tile && mine) && Math.max(Math.abs(where.tile[0] - mine[0]), Math.abs(where.tile[1] - mine[1])) <= d;
+		const reach = d => d >= 0x7d || !!where.held || near(d);
+		switch (list) {
+			case 0x00: return atom.type === 1 ? !!where.held : atom.type === 3 && near(0);
+			case 0x20: return false;
+			case 0x01: return reach(dist);
+			case 0x02: return !self && !where.held && reach(dist);
+			case 0x03: return near(0);
+			case 0x05: return reach(dist);
+			case 0x08: return !!where.held;
+			default: return true;
+		}
+	}
+	function atomMenu(atom, app, where = {}, mine = null) {
+		const shown = def => def && def.name && !def.name.startsWith('.') && !(def.flags & 0xc1);
 		const items = [], seen = new Set();
 		const add = (def, mode) => { if (!shown(def) || seen.has(def.name)) return; seen.add(def.name); items.push({ id: def.id, name: def.name, mode }); };
 		const own = app !== undefined && map.appearances.get(app);
-		for (const id of (own && own.verbs) || []) add(verbDefs.get(id), 'src');
-		const bit = TYPE_BITS[atom.type];
-		const mine = [me.app, me.clientApp].map(a => a !== undefined && map.appearances.get(a)).filter(Boolean);
-		for (const a of mine) for (const id of a.verbs || []) {
+		for (const id of (own && own.verbs) || []) {
 			const def = verbDefs.get(id);
-			if (def && def.args.length === 1 && (def.args[0].types & bit)) add(def, 'arg');
+			if (def && inList(def.srcSetting, atom, where, mine)) add(def, 'src');
+		}
+		const bit = TYPE_BITS[atom.type];
+		const ours = [me.app, me.clientApp].map(a => a !== undefined && map.appearances.get(a)).filter(Boolean);
+		for (const a of ours) for (const id of a.verbs || []) {
+			const def = verbDefs.get(id);
+			if (def && def.args.length === 1 && (def.args[0].types & bit) && inList(def.args[0].source, atom, where, mine)) add(def, 'arg');
 		}
 		return items.sort((p, q) => p.name.localeCompare(q.name));
 	}
 
 	function callVerb(name, args = []) {
+		if (args.length > 255) throw new RangeError('Too many verb arguments');
 		const ids = verbs.get(name.toLowerCase());
 		if (!ids || !ids.length) return false;
 		// src: our mob (type 2) for verbs its appearance lists, otherwise the client (type 8). Of several verbs of
@@ -577,40 +843,40 @@ wss.on('connection', (ws, req) => {
 		conn.send(2, Buffer.concat(parts));
 		return true;
 	}
+	// Run a DreamSeeker command line ("verb" then "quoted" args, or the rest as one text arg), as the page's
+	// command box does. Shared by the page ({t:'command'}) and the local /voice endpoint. Returns whether a verb ran.
+	sess.command = text => {
+		const mm = String(text).trim().match(/^(\S+)\s*([\s\S]*)$/);
+		if (!mm || mm[1].startsWith('.')) return false;
+		const args = [];
+		if (mm[2].startsWith('"')) for (const q of mm[2].matchAll(/"((?:[^"\\]|\\.)*)"?/g)) args.push(q[1].replace(/\\(.)/g, '$1'));
+		else if (mm[2]) args.push(mm[2]);
+		if (callVerb(mm[1], args) || callVerb(mm[1].replace(/-/g, ' '), args) || (ALIASES[mm[1].toLowerCase()] || []).some(n => callVerb(n, args)))
+			return true;
+		send({ t: 'out', html: '<span class="warning">Неизвестная команда: ' + mm[1].replace(/[<&]/g, '') + '</span>' });
+		return false;
+	};
+	sess.sid = sid;
 	sessions.set(sid, sess);
 	send({ t: 'session', sid });
-	// admins (see isAdminPage) get the debug mode; a recording keeps every message to and from the server
-	const admin = isAdminPage(req, wsQuery.get('admin'));
+	// admins (see isAdminPage) get the debug mode
 	send({ t: 'debug', allowed: admin });
-	let rec = null; // { started, items: [[ms, 'in'|'out', type, hex]], bytes }
-	const record = (dir, type, d) => {
-		if (!rec) return;
-		const hex = d ? d.toString('hex') : '';
-		rec.bytes += hex.length;
-		if (rec.bytes > 200e6) return; // a recording that ran for hours stops growing
-		rec.items.push([Date.now() - rec.started, dir, type, hex]);
-	};
-	sess.recordStart = () => { rec = { started: Date.now(), items: [], bytes: 0 }; };
-	sess.recordStop = () => {
-		const r = rec; rec = null;
-		if (!r) return null;
-		const out = { server: target, sid, started: new Date(r.started).toISOString(), wideVerbs: map.wideVerbs, messages: r.items };
-		// a copy stays with the gateway too (records/), for when the page could not save it
-		try { fs.mkdirSync(RECORDS, { recursive: true }); fs.writeFileSync(path.join(RECORDS, 'seeker-' + r.started + '-' + sid + '.json'), JSON.stringify(out)); } catch (_) {}
-		return out;
-	};
+	const statsFile = Date.now() + '-' + sid;
 	let nines = 0;
 
 	function openConn() {
 		const c = conn = new ByondConnection(ddHost, +ddPort);
-		const rawSend = c.send.bind(c);
-		c.send = (type, data) => { record('out', type, data); return rawSend(type, data); };
 		let topic = '';
 		c.on('ready', info => {
 			map.wideVerbs = info.wideVerbs;
 			send({ t: 'status', text: 'connected' });
 			// the login opens with the connection topic (byond://host:port?topic), as client/New's TopicData
-			c.send(26, Buffer.concat([Buffer.from(topic, 'latin1'), GUEST_LOGIN]));
+			try {
+				c.send(26, ticketLogin ? Buffer.from(auth.issue(owner, auth.address(req)) + '\0') : Buffer.concat([Buffer.from(topic, 'latin1'), GUEST_LOGIN]));
+			} catch (error) {
+				send({ t: 'status', text: error.message });
+				c.close(); closeWs(4003, 'session expired');
+			}
 		});
 		c.on('message', onMessage);
 		c.on('bad', (type, enc) => { if (process.env.SEEKER_DEBUG) console.log('[' + sid + '] BAD', type, enc.length, enc.subarray(0, 16).toString('hex')); });
@@ -620,7 +886,7 @@ wss.on('connection', (ws, req) => {
 			send({ t: 'status', text: 'disconnected' }); closeWs();
 		});
 		c.on('error', err => { console.log('[' + sid + '] connection error: ' + err.message); send({ t: 'status', text: 'error: ' + err.message }); });
-		guestTopic(target, ownTopic).then(t => { topic = t; if (conn === c) c.connect(); }, err => {
+		(ticketLogin ? Promise.resolve('') : guestTopic(target, ownTopic)).then(t => { topic = t; if (conn === c) c.connect(); }, err => {
 			console.log('[' + sid + '] guest ticket: ' + err.message);
 			send({ t: 'status', text: 'сервер не выдал билет гостя: ' + err.message }); closeWs();
 		});
@@ -629,7 +895,6 @@ wss.on('connection', (ws, req) => {
 	function onMessage(type, d) {
 		if (process.env.SEEKER_DUMP)
 			fs.appendFileSync(process.env.SEEKER_DUMP, JSON.stringify({ sid, t: Date.now(), type, hex: d.toString('hex') }) + '\n');
-		record('in', type, d);
 		if (process.env.SEEKER_DEBUG && ![106, 38, 14].includes(type))
 			console.log('[' + sid + '] <<', type, d.length, JSON.stringify(d.subarray(0, 120).toString('utf8').replace(/[\x00-\x1f]/g, '|')));
 		try { handle(type, d); } catch (err) {
@@ -710,6 +975,8 @@ wss.on('connection', (ws, req) => {
 				const a = map.handle(type, d);
 				const res = map.resources[a.icon];
 				a.iconRsc = res ? res.id.toString(16) : null;
+				// filters that take an icon (alpha masks, layer, displace) name it by its index in the resource list
+				for (const f of a.filters || []) if (f.icon != null) { const fr = map.resources[f.icon]; f.iconRsc = fr ? fr.id.toString(16) : null; }
 				const { verbs: _verbs, ...forBrowser } = a; // the browser does not need verb lists; keep them here
 				send({ t: 'app', a: forBrowser });
 				for (const id of a.overlays) want(id);
@@ -749,8 +1016,23 @@ wss.on('connection', (ws, req) => {
 				map.turfs.set = (k, v) => { changed.push([k, v]); return set(k, v); };
 				map.handle(type, d);
 				map.turfs.set = set;
+				windowCells = changed.map(([k]) => k.split(',').map(Number));
 				send({ t: 'turfs', z: map.z, x0: map.x0, y0: map.y0, bufW: map.bufW, bufH: map.bufH, reset: before !== map.z, cells: changed.map(([k, v]) => { const [x, y] = k.split(',').map(Number); return [x, y, v]; }) });
 				for (const [, v] of changed) want(v);
+				break;
+			}
+			case 32: { // the areas of the turf window just sent (one per cell, coded as its appearances), then
+				// u16 m, m × (u32 area, u32 appearance): areas that came into view or changed (SS13 weather is an overlay on areas)
+				let o = 0, prev = 0, i = 0;
+				const cells = [];
+				while (i < windowCells.length && o + 4 <= d.length) {
+					const v = d.readUInt32LE(o); o += 4;
+					let k = 1, id = v;
+					if (v === 0xffffffff) { id = prev; k = d[o++] + 1; } else prev = v;
+					for (; k > 0 && i < windowCells.length; k--, i++) cells.push([windowCells[i][0], windowCells[i][1], id]);
+				}
+				send({ t: 'areas', cells, apps: areaPairs(d, o) });
+				windowCells = [];
 				break;
 			}
 			case 241: { // turf changes: u16 n, then by column n turf indexes, n appearances, n areas; then maybe
@@ -768,16 +1050,19 @@ wss.on('connection', (ws, req) => {
 					}
 					return out.slice(0, n);
 				};
-				const idxs = column(), appsCol = column();
+				const idxs = column(), appsCol = column(), areasCol = column(), areaCells = [];
 				for (let i = 0; i < n && plane; i++) {
 					const idx = idxs[i], app = appsCol[i];
 					const z = Math.floor(idx / plane), x = idx % map.maxx, y = Math.floor((idx % plane) / map.maxx);
 					if (z !== map.z) continue;
 					map.turfs.set(x + ',' + y, app);
 					cells.push([x, y, app]);
+					areaCells.push([x, y, areasCol[i]]);
 					want(app);
 				}
 				if (cells.length) send({ t: 'turfset', cells });
+				const areaApps = areaPairs(d, o);
+				if (areaCells.length || areaApps.length) send({ t: 'areas', cells: areaCells, apps: areaApps });
 				break;
 			}
 			case 51: case 53: { // client.images add (51) / change (53): u32 id, u32 appearance, u8 loc type, u32 loc ref,
@@ -810,7 +1095,11 @@ wss.on('connection', (ws, req) => {
 				let p = 10;
 				if (ext & 0x01) { s.pan = (d[p] - 128) / 127; s.frequency = d.readFloatLE(p + 2); p += 9; }
 				if (ext & 0x02) { s.x = d.readFloatLE(p); s.y = d.readFloatLE(p + 4); s.z = d.readFloatLE(p + 8); s.falloff = d.readFloatLE(p + 12); p += 16; }
-				if (ext & 0x40 && !(ext & 0x3c) && p + 4 <= d.length) s.offset = d.readFloatLE(p); // 0x04-0x20 not seen yet
+				if (ext & 0x10) p += 2; // u16 (the world's sounds carry a constant here: seen 998, 263)
+				// an offset is sent with a sound starting for this client; without one a sound token's repeat of the same
+				// file on its channel only moves it (SS13 positional loops send that on every step)
+				s.starts = !!(ext & 0x40);
+				if (ext & 0x40 && !(ext & 0x2c) && p + 4 <= d.length) s.offset = d.readFloatLE(p); // 0x04, 0x08, 0x20 not seen yet
 				send(s);
 				break;
 			}
@@ -1017,13 +1306,16 @@ wss.on('connection', (ws, req) => {
 	}
 	const unknownTypes = new Set([10, 32, 59, 106, 113, 114, 141, 200, 202, 203, 226, 239]); // seen, not needed
 
-	// File transfer (message 159). Header (seq 0): u32 crc, u32 -1, u32 0, u32 2, u8 1, u32 size, u8 type,
+	// File transfer (message 159). Header (seq 0): u32 crc, u32 tag, u32 0, u32 2, u8 1, u32 size, u8 type,
 	// name\0, "##action=...;..."\0 [u8 1, u32 gzipped size]. A resource's file has the resource id as crc, and
-	// type | 0x80 when it is enciphered. The client answers [crc][-1][01] when it has the file cached, or
-	// [crc][-1][00][u32 1] to have it sent; data follows as seq 1..n: [crc][-1][u32 seq][u32 2][u32 offset][bytes].
+	// type | 0x80 when it is enciphered. The client answers [crc][tag][01] when it has the file cached, or
+	// [crc][tag][00][u32 1] to have it sent; data follows as seq 1..n: [crc][tag][u32 seq][u32 2][u32 offset][bytes].
+	// The tag is -1 for most files, but a sound the world plays from a file made at run time (TTS ",.ogg") comes
+	// numbered 0, 1, ...: answered with -1, the server never sent it and held back every resource after it (a ghost
+	// spawned invisible until the page was reloaded).
 	function onFile(d) {
 		const crc = d.readUInt32LE(0), seq = d.readUInt32LE(8);
-		const reply = tail => conn.send(159, Buffer.concat([d.subarray(0, 4), Buffer.from('ffffffff', 'hex'), tail]));
+		const reply = tail => conn.send(159, Buffer.concat([d.subarray(0, 8), tail]));
 		if (seq === 0) {
 			const size = d.readUInt32LE(17);
 			const z1 = d.indexOf(0, 22), z2 = d.indexOf(0, z1 + 1);
@@ -1034,15 +1326,19 @@ wss.on('connection', (ws, req) => {
 			const wire = gz ? d.readUInt32LE(z2 + 2) : size;
 			// load_rsc: a resource for the cache, or "resources", an .rsc fragment of several
 			const load = /load_rsc/.test(action), rsc = load && name === 'resources';
+			if (process.env.SEEKER_DEBUG_RES) console.log('[' + sid + '] transfer ' + hex8(crc) + ' name=' + JSON.stringify(name) + ' action=' + JSON.stringify(action) + ' type=' + d[21] + ' size=' + size + (cached.has(crc) ? ' cached' : '') + ' raw=' + d.toString('hex', 0, Math.min(d.length, 64)));
 			// (icons the world builds at run time come as load_rsc with no name: see ddmi.js)
 			if ((!name && !load) || size === 0 || (rsc && doneTransfers.has(hex8(crc))) || (load && !rsc && cached.has(crc))) { reply(Buffer.from([1])); return; }
 			const have = !rsc && sess.files.get(name);
 			if (have && have.crc === crc) { doFileAction(name, have, action); reply(Buffer.from([1])); return; }
+			const kept = !load && keptFile(crc);
+			if (kept) { kept.crc = crc; sess.files.set(name, kept); doFileAction(name, kept, action); reply(Buffer.from([1])); return; }
 			transfers.set(crc, { name, type: d[21], size: wire, gz, rsc, load, action, data: Buffer.alloc(wire), got: 0 });
 			reply(Buffer.from([0, 1, 0, 0, 0]));
 			return;
 		}
 		const tr = transfers.get(crc);
+		if (process.env.SEEKER_DEBUG_RES) console.log('[' + sid + '] chunk ' + hex8(crc) + ' seq=' + seq + ' len=' + d.length + (tr ? ' got=' + tr.got + '/' + tr.size : ' (no transfer)') + ' head=' + d.toString('hex', 0, 24));
 		if (!tr) return;
 		const offset = d.readUInt32LE(16), chunk = d.subarray(20);
 		chunk.copy(tr.data, offset);
@@ -1056,7 +1352,9 @@ wss.on('connection', (ws, req) => {
 			return;
 		}
 		if (tr.type & 0x80) data = decipher(data, crc);
+		if (!tr.load && resourceCrc(data) === crc) keepFile(crc, data);
 		if (tr.load && resourceCrc(data) === crc) tookResource(crc, tr.type & 0x7f, data);
+		else if (tr.load && process.env.SEEKER_DEBUG_RES) console.log('[' + sid + '] transfer ' + hex8(crc) + ' crc mismatch: ' + hex8(resourceCrc(data)) + ' type=' + tr.type + ' gz=' + tr.gz + ' len=' + data.length);
 		sess.files.set(tr.name, data);
 		sess.files.get(tr.name).crc = crc;
 		doFileAction(tr.name, data, tr.action);
@@ -1115,8 +1413,10 @@ wss.on('connection', (ws, req) => {
 		return props.length > 1 ? props.map(p => p + '=' + val(p)).join(';') : val(props[0]);
 	}
 
-	ws.on('message', raw => {
+	const handleBrowserMessage = raw => {
+		if (auth && (!owner.active || owner.expires <= Date.now())) { closeWs(4003, 'session expired'); return; }
 		let m; try { m = JSON.parse(raw); } catch (_) { return; }
+		if (!m || typeof m !== 'object' || Array.isArray(m)) return;
 		if (process.env.SEEKER_DEBUG) console.log('[' + sid + '] >>', String(raw).slice(0, 200));
 		if (m.t === 'key' && typeof m.key === 'string') {
 			// SS13 skins route every key through the keyDown/keyUp verbs; plain worlds use built-in movement
@@ -1144,15 +1444,8 @@ wss.on('connection', (ws, req) => {
 					Buffer.from([2]), Buffer.from(String(m.params || '') + '\0', 'utf8')]));
 			}
 		} else if (m.t === 'command' && typeof m.text === 'string') {
-			// DreamSeeker command line: verb name (spaces typed as '-') then "quoted" args, or the rest as one text arg
-			const mm = m.text.trim().match(/^(\S+)\s*([\s\S]*)$/);
-			if (!mm || mm[1].startsWith('.')) return;
-			const args = [];
-			if (mm[2].startsWith('"')) for (const q of mm[2].matchAll(/"((?:[^"\\]|\\.)*)"?/g)) args.push(q[1].replace(/\\(.)/g, '$1'));
-			else if (mm[2]) args.push(mm[2]);
-			if (!callVerb(mm[1], args) && !callVerb(mm[1].replace(/-/g, ' '), args) && !(ALIASES[mm[1].toLowerCase()] || []).some(n => callVerb(n, args)))
-				send({ t: 'out', html: '<span class="warning">Неизвестная команда: ' + mm[1].replace(/[<&]/g, '') + '</span>' });
-		} else if (m.t === 'raw' && process.env.SEEKER_DEBUG && Number.isInteger(m.type)) {
+			sess.command(m.text);
+		} else if (m.t === 'raw' && !auth && process.env.SEEKER_DEBUG === '1' && Number.isInteger(m.type)) {
 			conn.send(m.type, Buffer.from(String(m.hex || ''), 'hex')); // debugging aid: send an arbitrary message
 		} else if (m.t === 'verb' && typeof m.name === 'string') {
 			callVerb(m.name, Array.isArray(m.args) ? m.args : []);
@@ -1172,11 +1465,12 @@ wss.on('connection', (ws, req) => {
 				textArg(String(m.srcControl || 'mapwindow.map')), textArg(String(m.overControl || 'mapwindow.map')), textArg(String(m.params || ''))]));
 		} else if (m.t === 'menu' && Array.isArray(m.atoms)) {
 			// everything under the cursor, top first, each with its own verbs (DreamSeeker's map popup)
+			const tile = v => Array.isArray(v) && v.length === 2 && v.every(Number.isInteger) ? v : null;
 			const groups = m.atoms.filter(x => x && x.atom && Number.isInteger(x.atom.type)).slice(0, 40)
-				.map(x => ({ atom: x.atom, key: x.key, items: atomMenu(x.atom, x.app) })).filter(g => g.items.length);
+				.map(x => ({ atom: x.atom, key: x.key, items: atomMenu(x.atom, x.app, { tile: tile(x.tile), held: x.held === true }, tile(m.me)) })).filter(g => g.items.length);
 			send({ t: 'menu', at: m.at, groups });
 		} else if (m.t === 'menu' && m.atom && Number.isInteger(m.atom.type)) {
-			send({ t: 'menu', at: m.at, groups: [{ atom: m.atom, items: atomMenu(m.atom, m.app) }] });
+			send({ t: 'menu', at: m.at, groups: [{ atom: m.atom, items: atomMenu(m.atom, m.app, { held: m.held === true }) }] });
 		} else if (m.t === 'menuPick' && m.atom && verbDefs.has(m.id)) {
 			if (m.mode === 'src') sendVerb(m.id, m.atom.type, m.atom.ref, []);
 			else if (me.ref !== null) {
@@ -1185,13 +1479,20 @@ wss.on('connection', (ws, req) => {
 				const onMob = mobApp && mobApp.verbs && mobApp.verbs.includes(m.id);
 				sendVerb(m.id, onMob ? 2 : 8, onMob ? me.ref : 1, [atomArg(m.atom.type, m.atom.ref)]);
 			}
-		} else if (m.t === 'record' && admin) {
-			if (m.on) sess.recordStart();
-			else send({ t: 'recorded', data: sess.recordStop() });
+		} else if (m.t === 'stats' && admin) { // ?stats=1: the page's numbers, with the gateway's beside them, for a long session
+			const gw = gatewayStats();
+			send({ t: 'gwstats', gw });
+			if (m.data && m.log) {
+				try {
+					fs.mkdirSync(RECORDS, { recursive: true });
+					fs.appendFileSync(path.join(RECORDS, 'stats-' + statsFile + '.jsonl'), JSON.stringify({ at: new Date().toISOString(), page: m.data, gw }) + '\n');
+				} catch (err) { console.log('[' + sid + '] stats: ' + err.message); }
+			}
 		} else if (m.t === 'icon' && /^[0-9a-f]{1,8}$/.test(m.id || '')) {
 			// Icons over the page socket: as many at once as the map needs (a browser opens only ~6 HTTP
 			// connections to a site, and one waiting for a resource the server is still sending holds one up).
-			// Answer: one binary frame, u32 length of a JSON head ({ id, meta }), the head, then the PNG.
+			// Answer: one binary frame, u32 length of a JSON head ({ id, meta, keep }), the head, then the PNG; keep: the
+			// icon is the resource itself (not built here), so the page may keep it for good
 			const id = parseInt(m.id, 16) >>> 0;
 			fetchResource(id).then(e => {
 				if (ws.readyState !== 1) return;
@@ -1212,10 +1513,18 @@ wss.on('connection', (ws, req) => {
 		} else if (m.t === 'dialog' && Number.isInteger(m.id)) {
 			answerDialog(m.id, m.value === null || m.value === undefined ? null : String(m.value));
 		}
+	};
+	ws.on('message', raw => {
+		try { handleBrowserMessage(raw); }
+		catch (error) {
+			console.warn('[' + sid + '] invalid browser message: ' + error.name);
+			conn.close(); closeWs(1008, 'invalid message');
+		}
 	});
 	ws.on('close', (code, reason) => {
 		console.log('[' + sid + '] browser closed the page socket (' + code + (reason && reason.length ? ' ' + reason : '') + ')');
 		resFetchers.delete(askResource);
+		sess.topic.stop();
 		conn.removeAllListeners(); conn.on('error', () => {}); conn.close(); sessions.delete(sid);
 	});
 });
@@ -1298,6 +1607,11 @@ function patchHtml(html, win, sid) {
 		'var d=Object.getOwnPropertyDescriptor(window,k[0])||Object.getOwnPropertyDescriptor(Window.prototype,k[0]);' +
 		'try{Object.defineProperty(window,k[0],{get:function(){try{var p=parent.seekerFramePos&&parent.seekerFramePos(W);if(p)return p[k[1]]}catch(e){}' +
 		'return d&&d.get?d.get.call(window):0},configurable:true})}catch(e){}});' +
+		// and the screen it is on: the page, for a window on it (see seekerScreen), so tgui centres windows there
+		'[["availWidth","w"],["availHeight","h"],["width","w"],["height","h"]].forEach(function(k){' +
+		'var d=Object.getOwnPropertyDescriptor(Screen.prototype,k[0]);' +
+		'try{Object.defineProperty(screen,k[0],{get:function(){try{var s=parent.seekerScreen&&parent.seekerScreen(W);if(s)return s[k[1]]}catch(e){}' +
+		'return d&&d.get?d.get.call(screen):0},configurable:true})}catch(e){}});' +
 		// "#..." links would resolve against <base> and leave the page: keep them in it
 		'document.addEventListener("click",function(e){var a=e.target.closest&&e.target.closest("a[href]");if(!a)return;var h=a.getAttribute("href");' +
 		'if(h.charAt(0)==="#"){e.preventDefault();var t=h.length>1&&document.getElementById(h.slice(1));if(t)t.scrollIntoView();return}' +
@@ -1312,4 +1626,5 @@ function patchHtml(html, win, sid) {
 	return html.replace(/^(\s*<!doctype[^>]*>)?/i, (m) => m + shim);
 }
 
-server.listen(httpPort, () => console.log('seeker on http://localhost:' + httpPort + ' -> ' + (fixedServer || 'server chosen on the page') + ', rsc: ' + rscFiles.join(', ')));
+if (auth && !fixedServer) throw new Error('Authenticated Seeker requires --dd');
+server.listen(httpPort, process.env.SEEKER_BIND || '127.0.0.1', () => console.log('seeker on http://localhost:' + httpPort + ' -> ' + (fixedServer || 'server chosen on the page') + ', rsc: ' + rscFiles.join(', ')));

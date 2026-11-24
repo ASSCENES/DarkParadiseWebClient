@@ -3,3 +3,5 @@ seeker/node_modules/
 *.log
 *.jsonl
 seeker/records/
+ss14-seeker/RobustToolbox/
+ss14-seeker/bin/

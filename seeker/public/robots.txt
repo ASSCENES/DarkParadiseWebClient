@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /$
+Allow: /img/
+Allow: /fonts/
+Disallow: /a/
+Disallow: /auth/
+Disallow: /ws
+Disallow: /icon/
+Disallow: /res/
+Disallow: /game-status
+Disallow: /login.html
+
+Sitemap: https://spacestation13new.ru/sitemap.xml

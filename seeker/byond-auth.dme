@@ -1,0 +1,19 @@
+/world
+	hub = ""
+	maxx = 0
+	maxy = 0
+	maxz = 0
+	cache_lifespan = 0
+
+/CGI
+	_dm_interface = 9
+	var/authenticate = 1
+	var/list/cookies
+	var/list/params
+
+/CGI/proc/HttpHeader()
+	usr << "Content-Type: application/json"
+
+/CGI/Topic(href, list/input)
+	if(usr.ckey && usr.ckey != "guest")
+		usr << json_encode(list("ckey" = usr.ckey))

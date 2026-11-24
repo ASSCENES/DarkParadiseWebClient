@@ -32,6 +32,10 @@ function readFilter(r) {
 		delete f.c;
 	}
 	if (f.type === 2 && !(flags & 1)) f.x = 1; // outline: bit 0 size, 1 colour, 0x20 flags
+	if (f.type === 7) { // alpha: bit 2 x, 3 y, 0x20 flags (MASK_INVERSE 1, MASK_SWAP 2), 0x100 icon, 0x200 render_source
+		Object.assign(f, { x: flags & 4 ? f.size : 0, y: flags & 8 ? f.offset : 0, maskFlags: flags & 0x20 ? f.u16 : 0 });
+		delete f.size; delete f.offset;
+	}
 	return f;
 }
 const FILTER_KINDS = [null, 'blur', 'outline', 'drop_shadow', 'motion_blur', 'wave', 'ripple', 'alpha', 'displace', 'color',

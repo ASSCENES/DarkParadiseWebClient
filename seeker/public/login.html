@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Space Station 13 (SS13) — играть онлайн в браузере | Dark Paradise</title>
+<meta name="description" content="Играйте в Space Station 13 прямо в браузере — без установки BYOND. Русский сервер SS13 Dark Paradise: десятки профессий, антагонисты и ролевая игра на космической станции. Бесплатно.">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://spacestation13new.ru/">
+<meta name="theme-color" content="#070d1a">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/img/icon-192.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="ru_RU">
+<meta property="og:site_name" content="Dark Paradise — Space Station 13">
+<meta property="og:title" content="Space Station 13 — играть в браузере">
+<meta property="og:description" content="Русский сервер SS13 Dark Paradise. Без установки BYOND: откройте сайт и заступайте на смену.">
+<meta property="og:url" content="https://spacestation13new.ru/">
+<meta property="og:image" content="https://spacestation13new.ru/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preload" href="/fonts/russo-one-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="login.css">
+<script type="application/ld+json">
+{
+	"@context": "https://schema.org",
+	"@graph": [
+		{
+			"@type": "WebSite",
+			"name": "Dark Paradise — Space Station 13",
+			"alternateName": ["SS13 Dark Paradise", "Space Station 13 в браузере"],
+			"url": "https://spacestation13new.ru/",
+			"inLanguage": "ru"
+		},
+		{
+			"@type": "VideoGame",
+			"name": "Space Station 13",
+			"alternateName": "SS13",
+			"url": "https://spacestation13new.ru/",
+			"image": "https://spacestation13new.ru/img/og.jpg",
+			"description": "Многопользовательская ролевая песочница на космической станции. Русский сервер Dark Paradise, игра в браузере без установки BYOND.",
+			"genre": ["Ролевая игра", "Симулятор", "Песочница"],
+			"gamePlatform": "Web browser",
+			"playMode": "MultiPlayer",
+			"inLanguage": "ru",
+			"offers": { "@type": "Offer", "price": "0", "priceCurrency": "RUB" }
+		},
+		{
+			"@type": "FAQPage",
+			"mainEntity": [
+				{ "@type": "Question", "name": "Нужно ли устанавливать BYOND, чтобы играть в SS13?", "acceptedAnswer": { "@type": "Answer", "text": "Нет. На этом сайте Space Station 13 запускается прямо во вкладке браузера. Аккаунт BYOND нужен только чтобы сохранять персонажей; можно начать и гостем." } },
+				{ "@type": "Question", "name": "Это бесплатно?", "acceptedAnswer": { "@type": "Answer", "text": "Да. Игра и сервер бесплатны, подписок и платного доступа нет." } },
+				{ "@type": "Question", "name": "Можно ли играть с телефона?", "acceptedAnswer": { "@type": "Answer", "text": "Игра рассчитана на клавиатуру и мышь. С телефона сайт откроется, но удобнее играть с компьютера или ноутбука." } },
+				{ "@type": "Question", "name": "С чего начать новичку?", "acceptedAnswer": { "@type": "Answer", "text": "Возьмите профессию ассистента и спросите совета в канале OOC. Гайды и правила есть на вики Dark Paradise." } }
+			]
+		}
+	]
+}
+</script>
+</head>
+<body>
+<header class="top">
+	<a class="brand" href="/" aria-label="Dark Paradise — на главную"><img src="/img/icon-64.png" width="36" height="36" alt=""><span>Dark Paradise</span></a>
+	<nav>
+		<a href="https://wiki-ss13.space/" rel="noopener">Вики</a>
+		<a href="https://wiki-ss13.space/wiki/Rules" rel="noopener">Правила</a>
+		<a href="https://discord.com/invite/5N55TJgTa9" rel="noopener">Discord</a>
+		<a class="nav-play" href="#play">Играть</a>
+	</nav>
+</header>
+
+<main>
+	<section class="hero">
+		<div class="hero-text">
+			<p class="eyebrow">Русский сервер Space Station 13</p>
+			<h1><span>Space Station</span> <strong>13</strong></h1>
+			<p class="lead">Ролевая песочница на космической станции. Играйте прямо в браузере — без установки BYOND и клиента.</p>
+			<p class="live" id="live" hidden><i aria-hidden="true"></i><span id="live-text"></span></p>
+		</div>
+
+		<div class="card" id="play">
+			<h2>Заступить на смену</h2>
+			<p id="game-status" class="note" role="status"></p>
+			<div id="current" hidden>
+				<p id="identity"></p>
+				<div class="row"><a id="continue" class="button" href="/">Продолжить игру</a><button id="logout" class="ghost">Сменить аккаунт</button></div>
+			</div>
+			<div id="choices">
+				<button id="byond" class="button wide">Войти через BYOND</button>
+				<p class="hint">Персонажи и настройки сохраняются в аккаунте. Пароль вводится только на secure.byond.com.</p>
+				<div id="guest-choice">
+					<div class="or"><span>или</span></div>
+					<button id="guest" class="ghost wide">Играть как гость</button>
+					<p class="hint">Без регистрации. Гостевой вход запоминается в этом браузере.</p>
+				</div>
+			</div>
+			<p id="message" role="status" aria-live="polite"></p>
+		</div>
+	</section>
+
+	<section class="panel about">
+		<h2 class="bar">Выживи, если сможешь</h2>
+		<p>Недалёкое будущее. Корпорация отправила экипаж на свою станцию на краю космоса — чинить, лечить, исследовать и снабжать. Вот только среди коллег есть предатели, станцию трясёт от метеоров и аварий, а в техтоннелях кто-то ходит.</p>
+		<p>Space Station 13 — многопользовательская ролевая игра, где историю пишут сами игроки. Никаких сценариев: в одном раунде вы спокойно варите пиво в баре, в другом — тушите пожар в инженерном и вычисляете убийцу по отпечаткам пальцев.</p>
+	</section>
+
+	<section class="panel">
+		<h2 class="bar">Что вас ждёт</h2>
+		<ul class="features">
+			<li><h3>Десятки профессий</h3><p>От ассистента и уборщика до капитана, инженера, врача, учёного или офицера службы безопасности.</p></li>
+			<li><h3>Антагонисты</h3><p>Предатели, генокрады, культисты, ядерные оперативники, волшебники — и те, кто их ловит.</p></li>
+			<li><h3>Глубокие механики</h3><p>Атмосфера и давление, химия, хирургия, генетика, электросети и ИИ станции, который может сойти с ума.</p></li>
+			<li><h3>Каждый раунд новый</h3><p>Режимы, события и случайности: разгерметизация, радиационные бури, нашествия и бунты.</p></li>
+			<li><h3>Ролевая игра</h3><p>Свой персонаж, своя история и отношения с экипажем. Говорить и договариваться здесь так же важно, как стрелять.</p></li>
+			<li><h3>Русское сообщество</h3><p>Русскоязычный сервер с живыми администраторами, вики на русском и сообществом в Discord.</p></li>
+		</ul>
+	</section>
+
+	<section class="panel">
+		<h2 class="bar">Как начать</h2>
+		<ol class="steps">
+			<li><b>Войдите</b><span>Через BYOND, чтобы сохранять персонажей, или просто гостем.</span></li>
+			<li><b>Выберите персонажа</b><span>В лобби настройте внешность и профессию или зайдите наблюдателем.</span></li>
+			<li><b>Заступайте на смену</b><span>Присоединяйтесь к раунду. Первые шаги подскажет <a href="https://wiki-ss13.space/" rel="noopener">вики</a>.</span></li>
+		</ol>
+	</section>
+
+	<section class="panel faq">
+		<h2 class="bar">Вопросы</h2>
+		<details><summary>Нужно ли устанавливать BYOND?</summary><p>Нет. Игра запускается прямо во вкладке браузера. Аккаунт BYOND нужен только чтобы сохранять персонажей; можно начать и гостем.</p></details>
+		<details><summary>Это бесплатно?</summary><p>Да. Игра и сервер бесплатны, подписок и платного доступа нет.</p></details>
+		<details><summary>Можно играть с телефона?</summary><p>Игра рассчитана на клавиатуру и мышь. С телефона сайт откроется, но удобнее играть с компьютера или ноутбука.</p></details>
+		<details><summary>С чего начать новичку?</summary><p>Возьмите профессию ассистента и спросите совета в канале OOC — вам помогут. Гайды есть на <a href="https://wiki-ss13.space/" rel="noopener">вики Dark Paradise</a>, правила сервера — <a href="https://wiki-ss13.space/wiki/Rules" rel="noopener">здесь</a>.</p></details>
+	</section>
+</main>
+
+<footer class="foot">
+	<img src="/img/icon-64.png" width="28" height="28" alt="">
+	<p>Dark Paradise — сервер Space Station 13. SS13 — свободная игра с открытым исходным кодом.</p>
+	<nav><a href="https://wiki-ss13.space/" rel="noopener">Вики</a><a href="https://discord.com/invite/5N55TJgTa9" rel="noopener">Discord</a></nav>
+	<p class="credits">В соавторстве с kasta</p>
+</footer>
+<script src="login.js"></script>
+</body>
+</html>

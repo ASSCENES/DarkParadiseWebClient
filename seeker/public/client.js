@@ -7,6 +7,8 @@ const FLOAT_LAYER = -1;
 
 const state = {
 	apps: new Map(),          // appearance id -> appearance
+	areas: new Map(),         // "x,y" -> area id
+	areaApps: new Map(),      // area id -> appearance (drawn over its turfs: SS13 weather is an overlay on the area)
 	turfs: new Map(),         // "x,y" -> appearance id (current z)
 	z: -1, x0: 0, y0: 0, bufW: 0, bufH: 0,
 	objs: new Map(),          // "obj:ref" / "mob:ref" -> { x, y, z, dir, app, px, py, next } (x = 0xffff: inside something)
@@ -48,6 +50,14 @@ try {
 const wsArgs = [pageServer && 'server=' + encodeURIComponent(pageServer), loginParams && 'login=' + encodeURIComponent(loginParams), adminToken && 'admin=' + encodeURIComponent(adminToken)].filter(Boolean);
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (wsArgs.length ? '?' + wsArgs.join('&') : ''));
 ws.onopen = () => setStatus('рукопожатие…');
+fetch('/auth/session', { cache: 'no-store' }).then(response => response.json()).then(session => {
+	if (!session.active) { location.replace('/login.html' + location.search); return; } // (?embed=ss14 stays with the page)
+	// the account switch: hidden behind a small arrow beside the connection status
+	const arrow = document.getElementById('accarrow'), account = document.getElementById('account');
+	account.href = '/login.html' + location.search;
+	arrow.hidden = false;
+	arrow.onclick = () => { account.hidden = !account.hidden; arrow.classList.toggle('open', !account.hidden); };
+}).catch(() => {});
 
 // Every tab logs in with the same guest key, and a new login makes the server drop the previous one. Two tabs
 // that both auto-reconnect would keep kicking each other, so: tabs of this browser hand over through a
@@ -61,7 +71,7 @@ function showElsewhere(code) {
 	const dropped = code !== undefined && code !== null && code !== 3;
 	setStatus(code === 1 ? 'сервер отключил вас: его проверки не пропустили этот вход (гостей, бан…), причина — в чате, если сервер её прислал'
 		: dropped ? 'сервер отключил вас (код ' + code + ')'
-		: code === 3 ? 'с этим ключом вошли в другом месте (у всех гостей Seeker пока один ключ)' : 'сессия открыта в другом окне');
+: code === 3 ? 'с этим аккаунтом вошли в другом месте' : 'сессия открыта в другом окне');
 	if (document.getElementById('takeover')) return;
 	const b = document.createElement('button');
 	b.id = 'takeover';
@@ -111,7 +121,9 @@ function showServerForm(current) {
 			if (p) all[m] = p; else delete all[m];
 			sessionStorage.setItem(LOGIN, JSON.stringify(all));
 		} catch (_) {}
-		location.search = '?server=' + encodeURIComponent(m);
+		const query = new URLSearchParams(location.search); // (?embed=ss14 and the rest stay)
+		query.set('server', m);
+		location.search = '?' + query;
 	};
 	f.onsubmit = e => { e.preventDefault(); go(input.value, login.value); };
 	// opened from the game to switch: going back reconnects to the same server
@@ -119,6 +131,11 @@ function showServerForm(current) {
 		const back = Object.assign(document.createElement('button'), { type: 'button', className: 'cancel', textContent: 'Отмена' });
 		back.onclick = () => location.reload();
 		f.querySelector('button[type=submit]').after(back);
+		if (serverFixed && pageServer) { // an admin away from the gateway's own game: the way home
+			const home = Object.assign(document.createElement('button'), { type: 'button', className: 'cancel', textContent: 'Основной сервер' });
+			home.onclick = () => { const query = new URLSearchParams(location.search); query.delete('server'); location.search = '?' + query; };
+			back.after(home);
+		}
 	}
 	if (recent.length) list.append(Object.assign(document.createElement('span'), { textContent: 'Недавние:' }));
 	for (const r of recent) {
@@ -168,7 +185,6 @@ ws.onclose = () => {
 ws.binaryType = 'arraybuffer';
 ws.onmessage = e => {
 	if (e.data instanceof ArrayBuffer) return void iconArrived(e.data); // an icon asked for over the socket
-	if (pageRec && e.data.length < 2e6) pageRec.push([Math.round(performance.now() - pageRec.t0), 'gw', e.data]);
 	const m = JSON.parse(e.data);
 	if (Array.isArray(m)) for (const x of m) handle(x); else handle(m); // a batch: one server tick
 };
@@ -176,64 +192,17 @@ ws.onmessage = e => {
 function setStatus(t) { statusEl.textContent = t; }
 
 // ---------- debug mode (the gateway's admins only) ----------
-// Players have no lighting switch (it would be a fullbright); admins have it and "⏺ запись": a recording of the
-// session for bug reports. The gateway keeps every message to and from the game server; the page keeps what it
-// got from the gateway and sent to it, its errors, mouse actions and a state snapshot every few seconds. Stopping
-// saves one file with both (the gateway also keeps a copy in its records/ folder).
-let debugAllowed = false, pageRec = null, pageRecTimer = null;
+// Players have no lighting switch (it would be a fullbright); admins have it
+let debugAllowed = false;
+// The status line is where the gateway's admins change the server (only they can leave a gateway's own game)
+let currentServer = null, serverFixed = false;
+statusEl.addEventListener('click', () => { if (debugAllowed && currentServer) showServerForm(currentServer); });
 function setDebugMode(on) {
 	debugAllowed = on;
+	statusEl.classList.toggle('editable', on);
+	statusEl.title = on ? 'Сменить адрес сервера (только для админов шлюза)' : '';
 	document.getElementById('lightbtn').style.display = on ? 'inline-block' : 'none';
 	if (!on) state.lighting = true;
-	let b = document.getElementById('recbtn');
-	if (on && !b) {
-		b = Object.assign(document.createElement('button'), { id: 'recbtn', textContent: '⏺ запись', title: 'Записать всё для отладки (только для админов шлюза)' });
-		b.onclick = () => (pageRec ? stopRecording() : startRecording());
-		document.getElementById('mapwrap').appendChild(b);
-	}
-	if (b) b.style.display = on ? 'inline-block' : 'none';
-}
-const sendToGateway = ws.send.bind(ws);
-ws.send = data => {
-	if (pageRec && typeof data === 'string') pageRec.push([Math.round(performance.now() - pageRec.t0), 'page', data]);
-	return sendToGateway(data);
-};
-for (const level of ['error', 'warn']) {
-	const orig = console[level].bind(console);
-	console[level] = (...a) => { if (pageRec) pageRec.push([Math.round(performance.now() - pageRec.t0), 'console.' + level, a.map(x => x instanceof Error ? x.stack : String(x)).join(' ')]); orig(...a); };
-}
-addEventListener('error', e => { if (pageRec) pageRec.push([Math.round(performance.now() - pageRec.t0), 'error', String(e.error && e.error.stack || e.message)]); });
-function startRecording() {
-	if (!debugAllowed) return;
-	pageRec = Object.assign([], { t0: performance.now(), started: new Date().toISOString(), snapshots: [] });
-	let n = 0;
-	const snap = () => { try { const d = renderDump(); if (n++ % 6) delete d.snapshot; pageRec.snapshots.push([Math.round(performance.now() - pageRec.t0), d]); } catch (err) { pageRec.push([0, 'error', String(err.stack)]); } };
-	snap();
-	pageRecTimer = setInterval(snap, 5000); // a picture of the map every 30 s
-	ws.send(JSON.stringify({ t: 'record', on: true }));
-	const b = document.getElementById('recbtn');
-	b.textContent = '⏹ стоп'; b.classList.add('on');
-}
-function stopRecording() {
-	clearInterval(pageRecTimer);
-	try { pageRec.snapshots.push([Math.round(performance.now() - pageRec.t0), renderDump()]); } catch (_) {}
-	ws.send(JSON.stringify({ t: 'record', on: false }));
-	const b = document.getElementById('recbtn');
-	b.textContent = '… сохраняю'; b.classList.remove('on');
-}
-function saveRecording(server) {
-	const page = pageRec;
-	pageRec = null;
-	const b = document.getElementById('recbtn');
-	if (b) b.textContent = '⏺ запись';
-	if (!page) return;
-	const file = { seeker: 1, started: page.started, url: location.href, userAgent: navigator.userAgent, screen: [innerWidth, innerHeight, devicePixelRatio],
-		page: page.slice(), snapshots: page.snapshots, mouse: typeof mouseLog !== 'undefined' ? mouseLog : null, server };
-	const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([JSON.stringify(file)], { type: 'application/json' })),
-		download: 'seeker-record-' + page.started.replace(/[:.]/g, '-') + '.json' });
-	document.body.appendChild(a); a.click(); a.remove();
-	setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-	notice('Запись сохранена: файл ' + a.download + ' (копия у шлюза в папке records)');
 }
 
 // The map column takes the width the view needs at the window's height; the side panel (chat) gets the rest.
@@ -261,7 +230,7 @@ function handle(m) {
 			break;
 		case 'me': state.me = 'mob:' + m.ref; break;
 		case 'turfs':
-			if (m.reset) state.turfs.clear();
+			if (m.reset) { state.turfs.clear(); state.areas.clear(); }
 			Object.assign(state, { z: m.z, x0: m.x0, y0: m.y0, bufW: m.bufW, bufH: m.bufH });
 			for (const [x, y, id] of m.cells) state.turfs.set(x + ',' + y, id);
 			break;
@@ -273,6 +242,10 @@ function handle(m) {
 		case 'eye': state.eye = { x: m.x, y: m.y, onMob: m.onMob }; break;
 		case 'iconFail': iconFailed(m.id); break;
 		case 'turfset': for (const [x, y, id] of m.cells) state.turfs.set(x + ',' + y, id); break;
+		case 'areas':
+			for (const [x, y, id] of m.cells) state.areas.set(x + ',' + y, id);
+			for (const [id, app] of m.apps) state.areaApps.set(id, app);
+			break;
 		case 'images':
 			for (const id of m.del) { state.images.delete(id); state.vis.delete('image:' + id); }
 			for (const it of m.add) {
@@ -288,7 +261,7 @@ function handle(m) {
 			const key = m.type === 5 ? 'client' : m.type === 3 ? 'mob:' + m.ref : m.type === 2 ? 'obj:' + m.ref : 'image:' + m.ref;
 			if (!m.calls.length) { state.anims.delete(key); break; }
 			const now = performance.now(), cur = state.anims.get(key);
-			const track = (c, start) => ({ start, delay: c.delay * 100, loop: c.loop, steps: c.steps.map(s => ({ from: s.from, to: s.to, dur: Math.max(1, s.time * 100), easing: s.easing })) });
+			const track = (c, start) => ({ start, delay: c.delay * 100, loop: c.loop, parallel: !!(c.parallel || c.sub), steps: c.steps.map(s => ({ from: s.from, to: s.to, dur: Math.max(1, s.time * 100), easing: s.easing })) });
 			// animate() without a target comes as a message of its own with no new call (fresh 0): its steps go
 			// on the end of the playing sequence, or, with ANIMATION_PARALLEL, start a sequence alongside it from
 			// that sequence's start (SS13 balloon alerts: rise in one, fade in and out in the other)
@@ -318,7 +291,7 @@ function handle(m) {
 				}
 				tracks.push(t);
 			}
-			state.anims.set(key, { tracks, image: key.startsWith('image:') ? m.ref : null });
+			state.anims.set(key, { tracks: compactTracks(tracks, now), image: key.startsWith('image:') ? m.ref : null });
 			break;
 		}
 		case 'flick': state.flicks.set(m.kind + ':' + m.ref, { state: m.state, iconRsc: m.iconRsc, start: performance.now() }); break;
@@ -331,12 +304,19 @@ function handle(m) {
 			break;
 		case 'session': state.sid = m.sid; break;
 		case 'debug': setDebugMode(!!m.allowed); break;
-		case 'recorded': saveRecording(m.data); break;
+		case 'gwstats': statsGw = m.gw; break;
 		case 'mapstyle': setMapStyle(m.css); break;
 		case 'dump': { // debugging aid: the gateway's /__dump asks what this page draws
 			let data;
 			try { data = renderDump(); } catch (err) { data = { error: String(err && err.stack || err) }; }
-			ws.send(JSON.stringify({ t: 'dumped', data }));
+			let reply = JSON.stringify({ t: 'dumped', data });
+			// a gateway with player logins caps what a page may send: the picture of the map goes first
+			if (m.limit && new Blob([reply]).size > m.limit) {
+				delete data.snapshot;
+				reply = JSON.stringify({ t: 'dumped', data });
+				if (new Blob([reply]).size > m.limit) reply = JSON.stringify({ t: 'dumped', data: { error: 'dump over the socket limit' } });
+			}
+			ws.send(reply);
 			break;
 		}
 		case 'measure': { // client.MeasureText(): the size the text takes as maptext here, for the server to lay out
@@ -348,7 +328,7 @@ function handle(m) {
 		case 'font': addFont(m.family, m.url, m.cyrillic); break;
 		case 'tick': if (m.ms > 0 && m.ms < 1000) state.tickMs = m.ms; break;
 		case 'needServer': showServerForm(pageServer); break;
-		case 'server': if (!m.fixed) offerServerSwitch(m.addr); break;
+		case 'server': currentServer = m.addr; serverFixed = m.fixed; if (!m.fixed) offerServerSwitch(m.addr); break;
 		case 'reset': { // the gateway logged in again to refresh the map; the server resends map, objects and HUD.
 			// Keep showing what we have meanwhile; objects the server does not send again are dropped afterwards.
 			const at = state.resetAt = Date.now();
@@ -418,6 +398,7 @@ function soundGain(m) {
 	return g;
 }
 
+const soundPan = m => Math.max(-1, Math.min(1, m.x !== undefined && m.x ? m.x / 7 : m.pan || 0));
 async function playSound(m) {
 	const ctx = audioContext();
 	if (!ctx) return;
@@ -427,8 +408,9 @@ async function playSound(m) {
 		return;
 	}
 	const current = m.channel && audio.channels.get(m.channel);
-	if (current && m.status & SOUND_UPDATE) { // change a playing sound in place
+	if (current && (m.status & SOUND_UPDATE || (current.rsc === m.rsc && !m.starts))) { // change a playing sound in place
 		current.gain.gain.value = m.status & (SOUND_MUTE | SOUND_PAUSED) ? 0 : soundGain(m);
+		current.pan.pan.value = soundPan(m);
 		return;
 	}
 	let buf;
@@ -442,12 +424,12 @@ async function playSound(m) {
 	const gain = ctx.createGain();
 	gain.gain.value = m.status & SOUND_MUTE ? 0 : soundGain(m);
 	const pan = ctx.createStereoPanner();
-	pan.pan.value = Math.max(-1, Math.min(1, m.x !== undefined && m.x ? m.x / 7 : m.pan || 0));
+	pan.pan.value = soundPan(m);
 	src.connect(gain).connect(pan).connect(audio.master);
 	const ch = m.channel || 'any:' + Math.random();
-	audio.channels.set(ch, { src, gain });
+	audio.channels.set(ch, { src, gain, pan, rsc: m.rsc });
 	src.onended = () => { if (audio.channels.get(ch)?.src === src) audio.channels.delete(ch); };
-	src.start(0, m.offset || 0);
+	src.start(0, m.offset ? m.offset % buf.duration : 0); // (a token's offset can run past the file's end)
 }
 
 // ---------- alert() / input() ----------
@@ -546,24 +528,14 @@ function windowFor(name, params = '') {
 }
 
 // ---------- windows of their own ----------
-// Floating windows (tgui, browse() popups) open as browser windows of their own when the "⧉ окна" button is on:
-// the world moves and sizes them as DreamSeeker would. Browsers open a popup only shortly after a click or a key
-// (most windows open from one) or always, once popups are allowed for the site; a blocked one stays on the page.
-// A closed popup takes its page with it: it comes back from its HTML (tgui asks for a full update when ready).
-const POPUPS = 'seekerPopups';
-let popupsOn = (() => { try { return localStorage.getItem(POPUPS) !== '0'; } catch (_) { return true; } })();
-const popBtn = document.getElementById('popbtn');
-popBtn.classList.toggle('off', !popupsOn);
-popBtn.addEventListener('click', () => {
-	popupsOn = !popupsOn;
-	try { localStorage.setItem(POPUPS, popupsOn ? '1' : '0'); } catch (_) {}
-	popBtn.classList.toggle('off', !popupsOn);
-	for (const w of windows.values()) {
-		if (!w.own || !isShown(w)) continue;
-		if (popupsOn && !livePopup(w)) { hostIn(w, openPopup(w)); }
-		else if (!popupsOn && livePopup(w)) { dropPopup(w); hostIn(w, null); }
-	}
-});
+// Floating windows (tgui, browse() popups) can open as browser windows of their own, which the world moves and
+// sizes as DreamSeeker would; that is off, they stay on the page. Browsers open a popup only shortly after a click
+// or a key or always, once popups are allowed for the site; a blocked one stays on the page. A closed popup takes
+// its page with it: it comes back from its HTML (tgui asks for a full update when ready).
+// Inside the SS14 client (?embed=ss14) the page is a CEF view drawn into the game window: a popup there becomes a
+// blank window of its own.
+const embedded = new URLSearchParams(location.search).get('embed') === 'ss14';
+const popupsOn = false;
 const livePopup = w => !!(w.popup && !w.popup.closed);
 let popupHintAt = 0;
 function openPopup(w) {
@@ -620,8 +592,10 @@ function popupClosed(w) {
 addEventListener('pagehide', () => { for (const w of windows.values()) if (livePopup(w)) { w.closing = true; w.popup.close(); } });
 
 // Where pages are on the screen. Windows place themselves in screen pixels (tgui reads window.screenLeft/Top and
-// sends winset pos), so a page inside an iframe is told its real place: the browser's own screenLeft is the
-// tab's. The viewport's screen origin is learnt from mouse events (screenX - clientX), estimated until then.
+// sends winset pos), so a page inside an iframe is told its place. For a window on the page the "screen" is the
+// page itself (its screen.availWidth/Height too): tgui centres a new window on the screen it is told of, and on a
+// second monitor or a browser window off to the side the real one put it beyond the page's left edge. A popup is
+// told its real place; the viewport's screen origin is learnt from mouse events (screenX - clientX).
 let learntOrigin = null;
 for (const type of ['pointermove', 'pointerdown']) addEventListener(type, e => { learntOrigin = { x: e.screenX - e.clientX, y: e.screenY - e.clientY }; }, true);
 function pageOrigin() {
@@ -647,10 +621,11 @@ function framePos(w) {
 		const p = w.popup, c = p.seekerChrome || { x: (p.outerWidth - p.innerWidth) / 2, y: p.outerHeight - p.innerHeight };
 		return { x: p.screenX + c.x, y: p.screenY + c.y };
 	}
-	const o = pageOrigin(), r = w.frame.getBoundingClientRect();
-	return { x: o.x + r.left, y: o.y + r.top };
+	const r = w.frame.getBoundingClientRect();
+	return { x: r.left, y: r.top };
 }
 window.seekerFramePos = name => { const w = windows.get(String(name).replace(/\.browser$/, '')); return w ? framePos(w) : null; };
+window.seekerScreen = name => { const w = windows.get(String(name).replace(/\.browser$/, '')); return w && !livePopup(w) ? { w: innerWidth, h: innerHeight } : null; };
 function moveWindow(w, x, y) {
 	if (livePopup(w)) {
 		const p = w.popup, c = p.seekerChrome || { x: (p.outerWidth - p.innerWidth) / 2, y: p.outerHeight - p.innerHeight };
@@ -658,8 +633,8 @@ function moveWindow(w, x, y) {
 		return;
 	}
 	if (!w.box) return;
-	const o = pageOrigin(), fr = w.frame.getBoundingClientRect(), br = w.box.getBoundingClientRect();
-	const left = x - o.x - (fr.left - br.left), top = y - o.y - (fr.top - br.top);
+	const fr = w.frame.getBoundingClientRect(), br = w.box.getBoundingClientRect();
+	const left = x - (fr.left - br.left), top = y - (fr.top - br.top);
 	// keep the whole window on the page (its own title bar must stay reachable); a hidden window has no layout
 	// size, so its set size counts
 	const bw = w.box.offsetWidth || parseInt(w.box.style.width) || 0, bh = w.box.offsetHeight || parseInt(w.box.style.height) || 0;
@@ -685,13 +660,10 @@ function notice(text) {
 }
 
 const isShown = w => livePopup(w) || (w.box || w.frame).style.display !== 'none';
-// The say box (tgui-say, key T): over the map, low and centred, until the player drags it elsewhere; typing goes
-// straight into it. DreamSeeker places it from the skin, in screen pixels of a desktop window.
+// The say box (tgui-say, key T): in the middle of the map (see centreOnMap) until the player drags it elsewhere;
+// typing goes straight into it.
 function openSayBox(w) {
-	if (!w.placed) {
-		const m = document.getElementById('mapwrap').getBoundingClientRect(), bw = parseInt(w.box.style.width) || 270, bh = parseInt(w.box.style.height) || 30;
-		Object.assign(w.box.style, { left: Math.round(m.left + (m.width - bw) / 2) + 'px', top: Math.round(m.bottom - bh - 72) + 'px' });
-	}
+	if (!w.placed) centreOnMap(w);
 	const focusInput = () => {
 		try {
 			w.frame.focus();
@@ -727,6 +699,7 @@ function openWindow(name, html, params) {
 	const show = bare !== 'browseroutput' && (!!FIXED[bare] || bare.startsWith('tgui-window') || /(?:^|[;&])(size|can_close)=/.test(params));
 	if (w.box && show) w.own = true; // a window of its own (not a skin element): may get a browser window
 	if (w.own && show && !livePopup(w) && popupsOn) { const pop = openPopup(w); if (pop) { hostIn(w, pop); return; } }
+	if (w.name) dropSubMaps(w.name); // a new page makes its own map controls
 	w.frame.srcdoc = html;
 	w.dead = false;
 	showWindow(w, show);
@@ -742,7 +715,11 @@ function useChatPanel(frame) {
 	const check = () => {
 		let ready = false;
 		try { const chat = frame.contentDocument.querySelector('.Chat'); ready = !!(chat && chat.children.length); } catch (_) {}
-		if (ready) { frame.style.display = 'block'; outEl.style.display = 'none'; return; }
+		if (ready) {
+			frame.style.display = 'block'; outEl.style.display = 'none';
+			document.getElementById('cmd').style.display = commandBar() ? 'none' : ''; // one command line: the world's, if it has one
+			return;
+		}
 		const saved = (() => { try { return Object.keys(localStorage).some(k => /^hub:.*chat-state$/.test(k)); } catch (_) { return false; } })();
 		if (!reloaded && saved && Date.now() - started > 12000) { reloaded = true; started = Date.now(); frame.srcdoc = frame.srcdoc; }
 		if (Date.now() - started < 30000) setTimeout(check, 500);
@@ -754,6 +731,7 @@ function closeWindow(name) {
 	const w = windows.get(name.replace(/\.browser$/, ''));
 	if (!w || !w.box) return; // fixed panes stay
 	showWindow(w, false);
+	dropSubMaps(w.name);
 	w.frame.srcdoc = '';
 	w.html = null;
 }
@@ -827,11 +805,66 @@ function runCommand(text) {
 // Key macros the server defines at runtime (winset parent=default;name=Escape;command=...); "Any" is keyDown.
 const macros = new Map();
 
+// The say box (tgui say): anchored at 50,50 in the skin, so DreamSeeker keeps it in the middle, here over the map
+const SAY_BOX = 'tgui_say';
+function centreOnMap(w) {
+	const r = document.getElementById('mapwrap').getBoundingClientRect();
+	Object.assign(w.box.style, { left: Math.round(r.left + (r.width - w.box.offsetWidth) / 2) + 'px', top: Math.round(r.top + (r.height - w.box.offsetHeight) / 2) + 'px' });
+}
+
+// The say box focuses its text field as it opens, while its window is still hidden, which browsers ignore: once
+// the window is focused, the field is focused again. (Only there: a modal browser() gives focus back to the window
+// that had it, whose own fields must not take the keys.)
+function focusField(frame) {
+	let doc;
+	try { doc = frame.contentDocument; } catch (_) { return; }
+	if (!doc || (doc.activeElement && doc.activeElement !== doc.body)) return;
+	const field = doc.querySelector('textarea, input:not([type=hidden])');
+	if (field) field.focus();
+}
+
+// ---------- map controls in windows ----------
+// tgui's ByondUi (the character preview in the preferences, outfit and mech previews) puts a map control into its
+// window: winset(id, "parent=<window>;type=map;pos=x,y;size=WxH;is-visible=true"), pos in the page's pixels;
+// parent="" removes it. It shows the client.screen objects whose screen_loc names it ("<id>:1,1"): render.js
+// draws them (drawSubMaps) onto a canvas over the window's page.
+const subMaps = new Map(); // control id -> { id, parent, canvas, pos: [x, y], size: [w, h], visible }
+function setSubMap(id, p) {
+	let m = subMaps.get(id);
+	if ('parent' in p && !p.parent) { if (m) { m.canvas.remove(); subMaps.delete(id); } return; }
+	if (!m) {
+		const canvas = document.createElement('canvas');
+		canvas.className = 'submap';
+		m = { id, parent: null, canvas, pos: [0, 0], size: [0, 0], visible: true };
+		subMaps.set(id, m);
+	}
+	if (p.parent) m.parent = p.parent.replace(/\.browser$/, '');
+	if (p.pos) { const [x, y] = p.pos.split(/[,x]/).map(Number); if (Number.isFinite(x) && Number.isFinite(y)) m.pos = [x, y]; }
+	if (p.size) { const [x, y] = p.size.split('x').map(Number); if (x >= 0 && y >= 0) m.size = [x, y]; }
+	if ('is-visible' in p) m.visible = p['is-visible'] === 'true';
+	placeSubMap(m);
+}
+function placeSubMap(m) {
+	const w = m.parent && windows.get(m.parent);
+	if (!w || !w.box) { m.canvas.style.display = 'none'; return; }
+	if (m.canvas.parentNode !== w.box) w.box.appendChild(m.canvas);
+	Object.assign(m.canvas.style, {
+		left: w.frame.offsetLeft + m.pos[0] + 'px', top: w.frame.offsetTop + m.pos[1] + 'px',
+		width: m.size[0] + 'px', height: m.size[1] + 'px',
+		display: m.visible && m.size[0] > 0 && m.size[1] > 0 ? 'block' : 'none',
+	});
+}
+function dropSubMaps(win) {
+	for (const [id, m] of subMaps) if (m.parent === win) { m.canvas.remove(); subMaps.delete(id); }
+}
+
 // winset(control, "prop=value;other.prop=value"): an empty control means every property names its element.
 function applyWinset(control, params) {
 	const pairs = winsetPairs(params);
 	const parent = pairs.find(([k]) => k === 'parent'), name = pairs.find(([k]) => k === 'name');
 	if (parent && name) { // a new macro or element
+		const type = pairs.find(([k]) => k === 'type');
+		if (type && type[1] === 'map') { setSubMap(name[1], Object.fromEntries(pairs.filter(([k]) => k !== 'name'))); return; }
 		const command = pairs.find(([k]) => k === 'command');
 		if (parent[1] === 'default' && command) macros.set(name[1], command[1]);
 		return;
@@ -850,17 +883,20 @@ function applyWinset(control, params) {
 		// focus back to the map (the say box does this as it closes): keys are the game's again
 		if (/(^|[.:])map$/.test(ctl) && p.focus === 'true') { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); window.focus(); }
 		if (ctl === 'input') { // the command line; classic (non-hotkey) mode puts typed letters there
-			if ('text' in p) cmdInput.value = p.text;
-			if (p.focus === 'true') cmdInput.focus();
+			if ('text' in p) setCommandLine(p.text);
+			if (p.focus === 'true') focusCommandLine();
 			continue;
 		}
+		if (p.type === 'map' || subMaps.has(ctl)) { setSubMap(ctl, p); continue; }
 		const w = controlWindow(ctl);
 		if (!w) continue;
 		// the size first: a window shown by the same winset is placed with it
 		if (w.box && p.size) { const [x, y] = p.size.split('x').map(Number); if (x && y) sizeWindow(w, x, y); }
 		if ('is-visible' in p && (p['is-visible'] === 'true') !== isShown(w)) showWindow(w, p['is-visible'] === 'true');
-		if (p.focus === 'true' && w.box) { if (!isShown(w)) showWindow(w, true); if (livePopup(w)) w.popup.focus(); w.frame.focus(); }
-		// pos is in screen pixels (pages compute it from window.screenLeft/Top, which they are told: framePos)
+		if (p.focus === 'true' && w.box) { if (!isShown(w)) showWindow(w, true); if (livePopup(w)) w.popup.focus(); w.frame.focus(); if (w.name === SAY_BOX) focusField(w.frame); }
+		if (w.box && p.size) { const [x, y] = p.size.split('x').map(Number); if (x && y) sizeWindow(w, x, y); }
+		if (w.box && w.name === SAY_BOX && ('is-visible' in p || 'focus' in p || p.size) && isShown(w) && !w.placed) centreOnMap(w);
+		// pos is in the pixels of the screen the page is told of (framePos): the page's own for a window on it
 		if (w.box && p.pos) {
 			const [x, y] = p.pos.split(/[,x]/).map(Number);
 			if (Number.isFinite(x) && Number.isFinite(y)) moveWindow(w, x, y);
@@ -1000,6 +1036,24 @@ outEl.addEventListener('click', e => {
 });
 // Command line like DreamSeeker's input bar: 'say "hi"' runs a verb, byond://?... sends a Topic.
 const cmdInput = document.getElementById('topic');
+// The world's own command line, in its chat panel (tgui CommandBar): where there is one, it replaces ours
+function commandBar() {
+	try { return document.getElementById('chatpane').contentDocument.querySelector('.CommandBar__input'); } catch (_) { return null; }
+}
+function focusCommandLine() {
+	const bar = commandBar();
+	if (!bar) return cmdInput.focus();
+	document.getElementById('chatpane').focus();
+	bar.focus();
+}
+function setCommandLine(text) {
+	const bar = commandBar();
+	if (!bar) { cmdInput.value = text; return; }
+	// through the element's own setter and an input event: React keeps the field's value itself
+	const win = bar.ownerDocument.defaultView;
+	Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(bar, text);
+	bar.dispatchEvent(new win.Event('input', { bubbles: true }));
+}
 document.getElementById('cmd').addEventListener('submit', e => {
 	e.preventDefault();
 	const text = cmdInput.value.trim();
@@ -1011,7 +1065,7 @@ document.getElementById('cmd').addEventListener('submit', e => {
 });
 document.addEventListener('keydown', e => {
 	const typing = e.target.closest && e.target.closest('input, textarea');
-	if (e.code === 'Enter' && !typing) { e.preventDefault(); cmdInput.focus(); }
+	if (e.code === 'Enter' && !typing) { e.preventDefault(); focusCommandLine(); }
 	else if (e.code === 'Escape' && e.target === cmdInput) { cmdInput.value = ''; cmdInput.blur(); }
 });
 
@@ -1025,6 +1079,35 @@ const BYOND_KEYS = { ArrowUp: 'North', ArrowDown: 'South', ArrowRight: 'East', A
 	ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Ctrl', ControlRight: 'Ctrl', AltLeft: 'Alt', AltRight: 'Alt', Pause: 'Pause', ContextMenu: 'Apps',
 	NumpadMultiply: 'Multiply', NumpadAdd: 'Add', NumpadSubtract: 'Subtract', NumpadDivide: 'Divide', NumpadDecimal: 'Decimal',
 	Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backslash: '\\' };
+// Inside the SS14 client the engine hands CEF the right key code (VK) but SDL's scan code where Windows' is
+// expected, so e.code comes out wrong or empty: there it is rebuilt from keyCode before anything reads it.
+const VK_CODES = { 8: 'Backspace', 9: 'Tab', 13: 'Enter', 16: 'ShiftLeft', 17: 'ControlLeft', 18: 'AltLeft', 19: 'Pause', 27: 'Escape', 32: 'Space',
+	33: 'PageUp', 34: 'PageDown', 35: 'End', 36: 'Home', 37: 'ArrowLeft', 38: 'ArrowUp', 39: 'ArrowRight', 40: 'ArrowDown', 45: 'Insert', 46: 'Delete',
+	93: 'ContextMenu', 106: 'NumpadMultiply', 107: 'NumpadAdd', 109: 'NumpadSubtract', 110: 'NumpadDecimal', 111: 'NumpadDivide',
+	186: 'Semicolon', 187: 'Equal', 188: 'Comma', 189: 'Minus', 190: 'Period', 191: 'Slash', 192: 'Backquote', 219: 'BracketLeft', 220: 'Backslash', 221: 'BracketRight', 222: 'Quote' };
+const MODIFIER_VKS = { 16: 'shiftKey', 17: 'ctrlKey', 18: 'altKey' }, modifiers = { shiftKey: false, ctrlKey: false, altKey: false };
+function vkCode(k) {
+	if (k >= 65 && k <= 90) return 'Key' + String.fromCharCode(k);
+	if (k >= 48 && k <= 57) return 'Digit' + (k - 48);
+	if (k >= 96 && k <= 105) return 'Numpad' + (k - 96);
+	if (k >= 112 && k <= 135) return 'F' + (k - 111);
+	return VK_CODES[k];
+}
+function fixKeyCode(e) {
+	if (!embedded) return;
+	const code = vkCode(e.keyCode), mod = MODIFIER_VKS[e.keyCode];
+	if (mod) modifiers[mod] = e.type === 'keydown';
+	if (code && e.code !== code) try { Object.defineProperty(e, 'code', { value: code, configurable: true }); } catch (_) {}
+}
+for (const type of ['keydown', 'keyup']) window.addEventListener(type, fixKeyCode, true);
+// The engine sends mouse presses with no modifier flags (only its moves carry them), so Shift+right click (the verb
+// menu), Shift/Ctrl/Alt+click would all look plain: they are filled in from the keys and the last move.
+if (embedded) {
+	window.addEventListener('mousemove', e => { for (const k in modifiers) modifiers[k] = e[k]; }, true);
+	for (const type of ['mousedown', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, e => {
+		for (const k in modifiers) if (e[k] !== modifiers[k]) try { Object.defineProperty(e, k, { value: modifiers[k], configurable: true }); } catch (_) {}
+	}, true);
+}
 function byondKey(e) {
 	if (BYOND_KEYS[e.code]) return BYOND_KEYS[e.code];
 	if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3);
@@ -1040,19 +1123,81 @@ let mouseAt = null;
 mapEl.addEventListener('mousemove', e => { const r = mapEl.getBoundingClientRect(); mouseAt = [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top)]; });
 mapEl.addEventListener('mouseleave', () => { mouseAt = null; });
 const held = new Set();
+// A clicked button keeps the focus and game keys ignore a focused button: the page's own buttons give it back
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('button'); if (b) b.blur(); });
 function gameKey(e, type) {
 	if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(e.target.tagName) || e.target.isContentEditable) return;
 	const key = byondKey(e);
 	if (!key) return;
 	const down = type === 'keydown';
 	if (down && held.has(key)) { e.preventDefault(); return; } // no auto-repeat: the server repeats held keys itself
-	down ? held.add(key) : held.delete(key);
 	e.preventDefault();
+	sendGameKey(key, down, DIRS[e.code]);
+}
+function sendGameKey(key, down, dir) {
+	down ? held.add(key) : held.delete(key);
 	const macro = macros.get(down ? key : key + ' UP'); // "Any+UP" arrives url-decoded
 	if (macro) runCommand(macro);
 	const r = mapEl.getBoundingClientRect(), at = mouseAt || [Math.round(r.width / 2), Math.round(r.height / 2)];
-	ws.send(JSON.stringify({ t: 'key', key, down, dir: DIRS[e.code], mouse: at, size: [Math.round(r.width), Math.round(r.height)] }));
+	ws.send(JSON.stringify({ t: 'key', key, down, dir, mouse: at, size: [Math.round(r.width), Math.round(r.height)] }));
 }
+
+// ---------- phone mode ----------
+// A stick over the map's corner: pushing it holds the arrow keys (two of them for a diagonal), as if typed.
+// On by default on touch screens; the "📱" button switches it, and the choice is kept.
+const phoneBtn = document.getElementById('phonebtn'), joy = document.getElementById('joy'), knob = joy.querySelector('.knob');
+function setPhone(on) {
+	document.body.classList.toggle('phone', on);
+	phoneBtn.classList.toggle('on', on);
+	if (!on) joyRelease();
+}
+phoneBtn.addEventListener('click', () => {
+	const on = !document.body.classList.contains('phone');
+	try { localStorage.setItem('seekerPhone', on ? '1' : '0'); } catch (_) {}
+	setPhone(on);
+	phoneBtn.blur();
+});
+const JOY_KEYS = [[1, 'North'], [2, 'South'], [4, 'East'], [8, 'West']];
+// directions by 45° sector, counter-clockwise from east
+const JOY_SECTORS = [4, 1 | 4, 1, 1 | 8, 8, 2 | 8, 2, 2 | 4];
+let joyDirs = 0, joyPointer = null;
+function joySet(dirs) {
+	for (const [bit, key] of JOY_KEYS) {
+		const on = !!(dirs & bit);
+		if (on === !!(joyDirs & bit)) continue;
+		if (on || held.has(key)) sendGameKey(key, on, bit);
+	}
+	joyDirs = dirs;
+}
+function joyMove(e) {
+	const r = joy.getBoundingClientRect(), rad = r.width / 2;
+	let dx = e.clientX - (r.left + rad), dy = e.clientY - (r.top + rad);
+	const dist = Math.hypot(dx, dy), reach = rad - 22;
+	if (dist > reach) { dx *= reach / dist; dy *= reach / dist; }
+	knob.style.transform = `translate(${dx}px, ${dy}px)`;
+	if (dist < rad * 0.28) { joySet(0); return; }
+	const sector = Math.round(Math.atan2(-dy, dx) / (Math.PI / 4));
+	joySet(JOY_SECTORS[(sector + 8) % 8]);
+}
+function joyRelease() {
+	joyPointer = null;
+	joy.classList.remove('held');
+	knob.style.transform = '';
+	joySet(0);
+}
+joy.addEventListener('pointerdown', e => {
+	e.preventDefault();
+	joyPointer = e.pointerId;
+	try { joy.setPointerCapture(e.pointerId); } catch (_) {}
+	joy.classList.add('held');
+	joyMove(e);
+});
+joy.addEventListener('pointermove', e => { if (e.pointerId === joyPointer) joyMove(e); });
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) joy.addEventListener(type, e => { if (e.pointerId === joyPointer) joyRelease(); });
+joy.addEventListener('contextmenu', e => e.preventDefault());
+let phoneSaved = null;
+try { phoneSaved = localStorage.getItem('seekerPhone'); } catch (_) {}
+setPhone(phoneSaved === null ? matchMedia('(pointer: coarse)').matches : phoneSaved === '1');
 for (const type of ['keydown', 'keyup']) document.addEventListener(type, e => gameKey(e, type));
 // Windows (tgui, browse()) are documents of their own and their keys do not reach this page: game keys typed
 // there are passed on (text fields keep theirs; Escape stays with the window, which closes itself with it)
@@ -1061,24 +1206,25 @@ function forwardFrameKeys(frame) {
 		let doc;
 		try { doc = frame.contentDocument; } catch (_) { return; }
 		if (!doc) return;
-		for (const type of ['keydown', 'keyup']) doc.addEventListener(type, e => { if (e.code !== 'Escape') gameKey(e, type); });
+		for (const type of ['keydown', 'keyup']) doc.addEventListener(type, e => { fixKeyCode(e); if (e.code !== 'Escape') gameKey(e, type); });
 	});
 }
 for (const id of ['statpane', 'chatpane', 'title']) { const f = document.getElementById(id); if (f) forwardFrameKeys(f); }
-window.addEventListener('blur', () => { for (const key of held) ws.send(JSON.stringify({ t: 'key', key, down: false })); held.clear(); });
+window.addEventListener('blur', () => { for (const key of held) ws.send(JSON.stringify({ t: 'key', key, down: false })); held.clear(); joyRelease(); });
 // Ctrl+W is the browser's, and pages cannot take it: with Ctrl held in the game, ask before the tab closes
 window.addEventListener('beforeunload', e => { if (held.has('Ctrl')) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------- icons ----------
 const icons = new Map(); // rsc id -> { meta, img, bmp, ready }
 const iconFails = new Map(); // rsc id -> failed loads in a row
-// Icons come over the page socket (ws "icon" -> one binary frame: u32 head length, JSON { id, meta }, PNG):
+// Icons come over the page socket (ws "icon" -> one binary frame: u32 head length, JSON { id, meta, keep }, PNG):
 // any number at once, where HTTP would queue them behind the browser's few connections to the site. Before the
 // socket is open they come over HTTP as before.
 // Icons are kept in the browser's Cache Storage under their id (the file's CRC, so they never change) and come
 // from there on the next visit; only those missing are asked for. Icons built from run-time recipes are not kept.
 // (Cache Storage exists on https and localhost only; elsewhere every visit asks again.)
 const iconStore = (() => { try { return window.caches ? caches.open('seeker-icons-v1') : null; } catch (_) { return null; } })();
+try { if (window.caches) caches.delete('seeker-icons-1').catch(() => {}); } catch (_) {} // the store an older gateway filled
 function getIcon(rsc) {
 	let ic = icons.get(rsc);
 	if (ic) return ic.ready ? ic : null;
@@ -1099,11 +1245,43 @@ function askIcon(rsc) {
 		new Promise(res => { const img = new Image(); img.onload = () => res(img); img.onerror = () => res(null); img.src = '/icon/' + rsc + '.png'; }),
 	]).then(([meta, img]) => (meta && img && !meta.error ? iconReady(rsc, meta, img) : iconFailed(rsc)));
 }
-function iconReady(rsc, meta, img) {
+function iconReady(rsc, meta, img, bmp = null, hugeBlob = null) {
 	const ic = icons.get(rsc);
 	if (!ic) return;
 	meta.byName = new Map(meta.states.map(s => [s.name, s]));
-	Object.assign(ic, { meta, img, ready: true });
+	Object.assign(ic, { meta, img, bmp, hugeBlob, ready: true });
+}
+// A sheet is unpacked off the page's thread (createImageBitmap) before it counts as arrived: an <img> is unpacked on
+// the thread that first draws it, and big DMI sheets froze the game for tens of milliseconds each as they came into
+// view. A huge one (the full-screen damage overlay is 6720x6720, 181 MB unpacked, 0.2-0.6 s on the first draws) is
+// never unpacked whole here: each frame in use is cut from it, and until then that frame simply is not drawn.
+const HUGE_SHEET = 2048, HUGE_FRAMES_BYTES = 64e6;
+function hugeFrame(ic, rect) {
+	if (!ic.cuts) { ic.cuts = new Map(); ic.cutBytes = 0; }
+	const key = rect.sx + ',' + rect.sy;
+	if (ic.cuts.has(key)) return ic.cuts.get(key);
+	ic.cuts.set(key, null);
+	createImageBitmap(ic.hugeBlob, rect.sx, rect.sy, rect.w, rect.h).then(bmp => {
+		ic.cuts.set(key, bmp);
+		ic.cutBytes += bmp.width * bmp.height * 4;
+		for (const [k, old] of ic.cuts) {
+			if (ic.cutBytes <= HUGE_FRAMES_BYTES || k === key) break;
+			if (!old) continue;
+			ic.cuts.delete(k);
+			ic.cutBytes -= old.width * old.height * 4;
+			old.close();
+		}
+	}, () => ic.cuts.delete(key));
+	return null;
+}
+// Draws one frame of an icon; a frame of a huge sheet is there only once frameRect has seen it cut
+function drawFrame(g, ic, rect, x, y, w, h) {
+	if (ic.hugeBlob) {
+		const f = hugeFrame(ic, rect);
+		if (f) g.drawImage(f, x, y, w, h);
+		return;
+	}
+	g.drawImage(ic.bmp || ic.img, rect.sx, rect.sy, rect.w, rect.h, x, y, w, h);
 }
 // icons made at runtime reach the server a little after their first use: ask again later (backing off: some
 // never come)
@@ -1117,10 +1295,17 @@ function iconArrived(buf, fromStore = false) {
 	const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, len)));
 	if (!fromStore && iconStore && !head.built) iconStore.then(c => c.put('/icon-store/' + head.id, new Response(buf.slice(0)))).catch(() => {});
 	const img = new Image();
-	img.onload = () => iconReady(head.id, head.meta, img);
-	img.onerror = () => iconFailed(head.id);
+	const blob = new Blob([new Uint8Array(buf, 4 + len)], { type: 'image/png' });
+	img.onload = () => { // (its size is known by now; the picture itself is not unpacked until it is drawn)
+		if (Math.max(img.naturalWidth, img.naturalHeight) > HUGE_SHEET) return iconReady(head.id, head.meta, img, null, blob);
+		createImageBitmap(blob).then(bmp => iconReady(head.id, head.meta, img, bmp), () => iconReady(head.id, head.meta, img));
+	};
+	img.onerror = () => {
+		if (fromStore && iconStore) iconStore.then(c => c.delete('/icon-store/' + head.id)).catch(() => {}); // a damaged copy: asked for again next time
+		iconFailed(head.id);
+	};
 	// (an object URL per icon: its src also keys the tint and light caches)
-	img.src = URL.createObjectURL(new Blob([new Uint8Array(buf, 4 + len)], { type: 'image/png' }));
+	img.src = URL.createObjectURL(blob);
 }
 
 const DIR8 = { 2: 0, 1: 1, 4: 2, 8: 3, 6: 4, 10: 5, 5: 6, 9: 7 };
@@ -1154,7 +1339,8 @@ function frameRect(ic, iconState, dir, t, once = false, since = 0) {
 	const idx = st.offset + frame * st.dirs + Math.min(di, st.dirs - 1);
 	// (a plain image has no columns in its description: older gateways leave cols out)
 	const cols = meta.cols || 1;
-	return { sx: (idx % cols) * meta.width, sy: Math.floor(idx / cols) * meta.height, w: meta.width, h: meta.height, done };
+	const rect = { sx: (idx % cols) * meta.width, sy: Math.floor(idx / cols) * meta.height, w: meta.width, h: meta.height, done };
+	return ic.hugeBlob && !hugeFrame(ic, rect) ? null : rect; // still being cut from its sheet
 }
 
 // color: [r, g, b, a] multiply; cached per frame
@@ -1166,14 +1352,14 @@ function tinted(ic, rect, color) {
 	c = document.createElement('canvas');
 	c.width = rect.w; c.height = rect.h;
 	const g = c.getContext('2d');
-	g.drawImage(ic.bmp || ic.img, rect.sx, rect.sy, rect.w, rect.h, 0, 0, rect.w, rect.h);
+	drawFrame(g, ic, rect, 0, 0, rect.w, rect.h);
 	const [r, gg, b] = color;
 	if (r !== 255 || gg !== 255 || b !== 255) {
 		g.globalCompositeOperation = 'multiply';
 		g.fillStyle = `rgb(${r},${gg},${b})`;
 		g.fillRect(0, 0, rect.w, rect.h);
 		g.globalCompositeOperation = 'destination-in';
-		g.drawImage(ic.bmp || ic.img, rect.sx, rect.sy, rect.w, rect.h, 0, 0, rect.w, rect.h);
+		drawFrame(g, ic, rect, 0, 0, rect.w, rect.h);
 	}
 	if (tintCache.size > 4000) tintCache.clear();
 	tintCache.set(key, c);

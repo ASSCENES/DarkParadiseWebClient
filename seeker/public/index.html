@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Seeker</title>
+<title>Dark Paradise — SS13</title>
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="/img/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/img/icon-192.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <style>
 	:root {
 		--bg: #101216; --panel: #181b21; --text: #d7dbe0; --muted: #8a919c; --line: #2a2f38; --accent: #4f8cff;
@@ -15,7 +19,14 @@
 	#app { display: grid; grid-template-columns: var(--mapw, minmax(0, 1fr)) minmax(360px, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; overflow: hidden; }
 	#mapwrap { position: relative; overflow: hidden; background: #000; }
 	#map { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
-	#status { position: absolute; left: 8px; top: 8px; padding: 4px 8px; background: rgba(0,0,0,.6); border-radius: 4px; font-size: 12px; color: var(--muted); pointer-events: none; }
+	#statusbar { position: absolute; left: 8px; top: 8px; z-index: 3; display: flex; align-items: center; gap: 4px; pointer-events: none; }
+	#status.editable { pointer-events: auto; cursor: pointer; }
+	#status.editable:hover { color: var(--text); }
+	#accarrow { pointer-events: auto; padding: 2px 5px; background: rgba(0,0,0,.6); color: var(--muted); border: 0; border-radius: 4px; font-size: 11px; line-height: 1.4; cursor: pointer; }
+	#accarrow:hover { color: var(--text); }
+	#accarrow.open { transform: rotate(180deg); }
+	#account { pointer-events: auto; padding: 3px 8px; background: #111c29; color: #a5e3db; border-radius: 4px; font: 12px system-ui; text-decoration: none; white-space: nowrap; }
+	#status { padding: 4px 8px; background: rgba(0,0,0,.6); border-radius: 4px; font-size: 12px; color: var(--muted); pointer-events: none; }
 	#side { display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-width: 0; min-height: 0; }
 	#out { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; word-wrap: break-word; }
 	#out div { margin-bottom: 2px; }
@@ -43,14 +54,21 @@
 	#cmd { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); }
 	#cmd input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
 	#lightbtn { position: absolute; right: 8px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
-	#lightbtn.off, #soundbtn.off, #shadowbtn.off, #popbtn.off { color: var(--muted); text-decoration: line-through; }
-	#popbtn { position: absolute; right: 214px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
-	#recbtn { position: absolute; left: 8px; top: 34px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
-	#recbtn.on { color: #fff; background: #b3261e; border-color: #ff5c5c; }
+	#lightbtn.off, #soundbtn.off, #shadowbtn.off { color: var(--muted); text-decoration: line-through; }
 	#notice { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 40; display: none; max-width: min(520px, calc(100vw - 32px)); padding: 8px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); font-size: 13px; cursor: pointer; }
 	#shadowbtn { position: absolute; right: 148px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
 	#soundbtn { position: absolute; right: 78px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
-	#serverbtn { position: absolute; right: 290px; top: 8px; z-index: 2; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#phonebtn { position: absolute; right: 218px; top: 8px; z-index: 2; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
+	#phonebtn.on { color: var(--text); border-color: var(--accent); }
+	/* phone mode: a stick over the map's corner holds the arrow keys */
+	#joy { display: none; position: absolute; left: 20px; bottom: 20px; z-index: 3; width: 150px; height: 150px; border-radius: 50%; background: rgba(96,125,139,.72); border: 4px solid rgba(53,71,81,.85); box-shadow: 0 0 18px rgba(0,0,0,.35); touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+	body.phone #joy { display: block; }
+	body.phone #map { touch-action: manipulation; }
+	#joy svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+	#joy .knob { position: absolute; left: 50%; top: 50%; width: 70px; height: 70px; margin: -35px 0 0 -35px; border-radius: 50%; background: rgba(96,125,139,.95); border: 3px solid rgba(69,90,100,.95); box-shadow: 0 0 14px rgba(0,0,0,.45); pointer-events: none; transition: transform .08s ease-out; }
+	#joy.held .knob { transition: none; background: rgba(120,150,165,.98); }
+	.submap { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 1; }
+	#serverbtn { position: absolute; right: 320px; top: 8px; z-index: 2; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 8px; background: rgba(0,0,0,.6); color: var(--text); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; cursor: pointer; }
 	#serverform { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; width: min(380px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
 	#serverform h2 { margin: 0 0 4px; font-size: 16px; }
 	#serverform label { font-size: 12px; color: var(--muted); }
@@ -99,7 +117,7 @@
 </head>
 <body>
 <div id="app">
-	<div id="mapwrap"><canvas id="map"></canvas><iframe id="title" title="Лобби"></iframe><div id="status">подключение…</div><button id="lightbtn" title="Освещение вкл/выкл (отладка, только для админов шлюза)" style="display:none">☀ свет</button><button id="soundbtn" title="Звук вкл/выкл">♪ звук</button><button id="shadowbtn" title="Тени под объектами (ambient occlusion): красивее, но тяжелее">◐ тени</button><button id="popbtn" title="Окна tgui и браузера — отдельными окнами (нужно разрешить всплывающие окна)">⧉ окна</button></div>
+	<div id="mapwrap"><canvas id="map"></canvas><iframe id="title" title="Лобби"></iframe><div id="statusbar"><div id="status">подключение…</div><button id="accarrow" type="button" title="Аккаунт" hidden>▸</button><a id="account" href="/login.html" hidden>Сменить аккаунт</a></div><button id="lightbtn" title="Освещение вкл/выкл (отладка, только для админов шлюза)" style="display:none">☀ свет</button><button id="soundbtn" title="Звук вкл/выкл">♪ звук</button><button id="shadowbtn" title="Тени под объектами (ambient occlusion): красивее, но тяжелее">◐ тени</button><button id="phonebtn" title="Режим телефона: джойстик для ходьбы">📱 телефон</button><div id="joy" aria-label="Джойстик"><svg viewBox="0 0 150 150" aria-hidden="true"><g fill="none" stroke="rgba(220,230,235,.6)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M75 34V14M66 23l9-9 9 9"/><path d="M75 116v20M66 127l9 9 9-9"/><path d="M34 75H14M23 66l-9 9 9 9"/><path d="M116 75h20M127 66l9 9-9 9"/></g></svg><div class="knob"></div></div></div>
 	<div id="side">
 		<iframe id="statpane" title="Статпанель"></iframe>
 		<iframe id="chatpane" title="Чат"></iframe>

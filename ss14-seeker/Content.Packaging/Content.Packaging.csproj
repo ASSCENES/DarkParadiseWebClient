@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ServerGarbageCollection>True</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <Import Project="..\RobustToolbox\Imports\Packaging.props" />
+  <Import Project="..\RobustToolbox\MSBuild\Robust.Properties.targets" />
+</Project>

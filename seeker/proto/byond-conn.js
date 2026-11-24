@@ -80,6 +80,11 @@ class ByondConnection extends EventEmitter {
 
 	send(type, payload = Buffer.alloc(0)) {
 		if (!this.sock || !this.ready) return; // (before the handshake there is no key to send with)
+		if (!Buffer.isBuffer(payload) || payload.length > 65534) {
+			this.close();
+			if (this.listenerCount('error')) this.emit('error', new RangeError('BYOND client packet exceeds 65534 bytes'));
+			return false;
+		}
 		const enc = encrypt(payload, this.key);
 		const h = Buffer.alloc(6);
 		h.writeUInt16BE(this.seq, 0); h.writeUInt16BE(type, 2); h.writeUInt16BE(enc.length, 4);
@@ -87,7 +92,7 @@ class ByondConnection extends EventEmitter {
 		this.seq = (this.seq * 0x43D4) % 0xFFF1 || 1;
 	}
 
-	close() { this.sock && this.sock.destroy(); }
+	close() { this.ready = false; this.sock && this.sock.destroy(); }
 }
 
 module.exports = { ByondConnection };
